@@ -1,0 +1,238 @@
+<html>
+
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css">
+    <link rel="stylesheet" href="http://fonts.googleapis.com/css?family=Open+Sans:400,300,600,700">
+    <style type="text/css">
+        body {
+            padding: 0;
+            margin: 0;
+            -webkit-font-smoothing: antialiased;
+            font-family: "Open Sans";
+            color: white;
+        }
+
+        a, a:hover, a:focus {
+            color: white;
+            font-weight: bold;
+        }
+
+        .center-panel {
+            height: 450px;
+        }
+
+        .background,
+        .login-bg {
+            background-image: url('MelbourneRoofTops.jpg');
+            background-repeat: no-repeat;
+            background-size: cover;
+        }
+
+        .background {
+            width: 100%;
+            height: 100%;
+            background-position: center top;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .login-bg,
+        .login-content {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 0;
+            right: 0;
+        }
+
+        .login-bg {
+            background-attachment: fixed;
+            background-position: center 0;
+            filter: blur(4px);
+            animation: blur-animation 5s infinite;
+            border-radius: 10px;
+        }
+
+        .login-content {
+            background-color: rgba(10, 10, 10, 0.6);
+            border-radius: 10px;
+            padding: 40px;
+        }
+
+        .green-button {
+            width: 100%;
+            margin: 20px 0px;
+            background-color: rgb(94, 188, 119);
+            color: White;
+        }
+
+        .logo {
+            width: 100%;
+            height: 100px;
+            margin-top: -25px;
+            margin-bottom: 15px;
+            background-image: url("pt-logo-white.png");
+            background-size: contain;
+            background-repeat: no-repeat;
+            background-position: center center;
+        }
+
+        .inset-shadow {
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3), 0 0 40px rgba(0, 0, 0, 0.1) inset;
+        }
+
+        .inset-shadow:before,
+        .inset-shadow:after {
+            content: "";
+            position: absolute;
+            z-index: -1;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.8);
+            top: 0;
+            bottom: 0;
+            left: 10px;
+            right: 10px;
+            border-radius: 100px / 10px;
+        }
+
+        .inset-shadow:after {
+            right: 10px;
+            left: auto;
+            transform: skew(8deg) rotate(3deg);
+        }
+
+        .disclaimer {
+            margin-top: -15px;
+        }
+
+        @keyframes blur-animation {
+            0% {
+                filter: blur(2px);
+            }
+            50% {
+                filter: blur(5px);
+            }
+            100% {
+                filter: blur(2px);
+            }
+        }
+
+        .form-checkbox {
+            border-radius: 4px;
+        }
+
+        .form-group-lg .form-checkbox {
+            padding: 0;
+        }
+
+        .form-checkbox div {
+            clear: both;
+            overflow: hidden;
+        }
+
+        .form-checkbox label {
+            width: 100%;
+            font-weight: normal;
+        }
+
+        .form-checkbox input[type="checkbox"]:empty {
+            display: none;
+        }
+
+        .form-checkbox input[type="checkbox"]:empty~label {
+            position: relative;
+            line-height: 2.5em;
+            text-indent: 3.25em;
+            cursor: pointer;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            user-select: none;
+        }
+
+        .form-checkbox input[type="checkbox"]:empty~label:before {
+            position: absolute;
+            display: block;
+            top: 0;
+            bottom: 0;
+            left: 0;
+            content: '';
+            width: 2.5em;
+            background: #D1D3D4;
+            border-radius: 5px 0 0 5px;
+        }
+
+        .form-checkbox input[type="checkbox"]:hover:not(:checked)~label {
+            color: #888;
+        }
+
+        .form-checkbox input[type="checkbox"]:hover:not(:checked)~label:before {
+            content: '\2714';
+            text-indent: .9em;
+            color: #C2C2C2;
+        }
+
+        .form-checkbox input[type="checkbox"]:not(:checked)~label:before {
+            content: '\2714';
+            text-indent: .9em;
+            color: #C2C2C2;
+        }
+
+        .form-checkbox input[type="checkbox"]:checked~label {
+            color: #777;
+        }
+
+        .form-checkbox input[type="checkbox"]:checked~label:before {
+            content: '\2714';
+            text-indent: .9em;
+            color: #333;
+            background-color: #ccc;
+        }
+
+        .form-checkbox input[type="checkbox"]:focus~label:before {
+            box-shadow: 0 0 0 3px #999;
+        }
+
+        .form-checkbox input[type="checkbox"]:checked~label:before {
+            color: #fff;
+            background-color: rgb(94, 188, 119);
+            margin-bottom: 1px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="background">
+        <div class="col-sm-3 col-md-4 hidden-xs"></div>
+        <div class="center-panel col-xs-12 col-sm-6 col-md-4">
+            <div class="login-bg inset-shadow"></div>
+            <div class="login-content form-horizontal">
+                <div class="logo"></div>
+                <div class="form-group form-group-lg">
+                    <input type="text" class="form-control" placeholder="E-mail" />
+                </div>
+                <div class="form-group form-group-lg">
+                    <input type="password" class="form-control" placeholder="Password" />
+                </div>
+                <div class="form-group form-group-lg ">
+                    <div class="form-control form-checkbox ">
+                        <input type="checkbox" name="checkbox" id="checkbox2" />
+                        <label for="checkbox2">Remember Me</label>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <button type="button" class="btn btn-success btn-lg green-button">Log In</button>
+                </div>
+                <div class="text-center disclaimer">
+                    <span>© Rockend 2017</span><br/>
+                    <span><a href="#">Terms of Use</a> and <a href="#">Privacy Policy</a></span>
+                </div>
+            </div>
+        </div>
+        <div class="col-sm-3 col-md-4 hidden-xs"></div>
+    </div>
+</body>
+
+</html>

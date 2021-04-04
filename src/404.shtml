@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	
+    <title>Kyryll Tenin Baum</title>
+	
+    <meta name="Description" content="Kyryll. The guy who couldn't even if cared enough to want to not be a weirdo." />
+    <meta name="viewport" content="width=1000, user-scalable=no" />
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=EDGE, chrome=1 " />
+    <meta charset="utf-8" />
+    <link rel="shortcut icon" href="favicon.ico">
+    <link rel="icon" type="image/gif" href="animated_favicon.gif">
+    <link rel="apple-touch-icon" href="apple-touch-icon.png">
+	
+    <!--link type="text/css" rel="stylesheet" href="css/fonts.css" /-->
+    <link type="text/css" rel="stylesheet" href="css/kyryll.css" />
+    
+    <script src="js/jquery.js"></script>
+    <script src="js/util.js"></script>
+	
+    <script src="js/dictionary.js"></script>
+	
+    <script type="text/javascript">
+		
+	(function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+	(i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+	m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+	})(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+	
+	ga('create', 'UA-16836638-3', 'kyryll.com');
+	ga('send', 'pageview');
+        
+    </script>
+	
+</head>
+<body style="display: block;">
+	
+	<div id="HTTP_REFERER" style="display: none;"><!--#echo var="HTTP_REFERER" --></div>
+	<div id="REMOTE_ADDR" style="display: none;"><!--#echo var="REMOTE_ADDR" --></div>
+	<div id="REQUEST_URI" style="display: none;"><!--#echo var="REQUEST_URI" --></div>
+	<div id="HTTP_HOST" style="display: none;"><!--#echo var="HTTP_HOST" --></div>
+	<div id="HTTP_USER_AGENT" style="display: none;"><!--#echo var="HTTP_USER_AGENT" --></div>
+	<div id="REDIRECT_STATUS" style="display: none;"><!--#echo var="REDIRECT_STATUS" --></div>
+	
+	<div id="loading-splash">
+		<div class="loading-splash-center">
+			<p class="loading-term"><span class="loading-term">sorry</span>&nbsp|&nbspˈsär-ē, ˈsȯr-&nbsp|&nbsp</p>
+			<p class="loading-definition">[adjective] : feeling sorrow, regret, or penitence</p>
+			<p class="loading-definition">sorry I could not find any matches to your <!--#echo var="REQUEST_URI" --> query :)</i>.</p>
+		</div>
+	</div>
+	
+    <!--img src="http://cdn.css-tricks.com/images/404.jpg" alt="Page Not Found (404)." style="position: absolute; left: 50%; top: 50%; margin-left: -285px; margin-top: -190px;"-->
+    
+</body>
+
+</html>
+<!-- 
+                                                                                                                                                                                                                                                
+--> 
