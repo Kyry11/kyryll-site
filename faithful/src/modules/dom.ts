@@ -83,6 +83,10 @@ export function rand(min: number, max: number): number {
 export function splitIntoLetters(el: Element, startIndex = 0): number {
   let index = startIndex
 
+  // Captured before the split, and restored as the element's accessible name
+  // once its glyphs have been scattered into aria-hidden spans.
+  const spoken = (el.textContent ?? '').replace(/\s+/g, ' ').trim()
+
   const walk = (node: Node): void => {
     for (const child of Array.from(node.childNodes)) {
       if (child.nodeType === Node.TEXT_NODE) {
@@ -95,9 +99,17 @@ export function splitIntoLetters(el: Element, startIndex = 0): number {
           span.className = 'ct-letter'
           span.style.setProperty('--i', String(index++))
           span.textContent = char
-          // A space inside an inline-block is not announced as a word break,
-          // so the whole line would be read as one token without this.
-          if (char === ' ') span.setAttribute('aria-hidden', 'false')
+          /*
+           * Hidden from assistive technology, every one of them. A run of
+           * per-character inline-blocks invites a screen reader to spell the
+           * text out; the caller puts the real string back as an aria-label on
+           * the container, so the whole phrase is announced once.
+           *
+           * An earlier version set aria-hidden="false" on spaces only, with a
+           * comment about word breaks. That is the attribute's default value,
+           * so it did precisely nothing.
+           */
+          span.setAttribute('aria-hidden', 'true')
           frag.appendChild(span)
         }
         child.replaceWith(frag)
@@ -108,5 +120,8 @@ export function splitIntoLetters(el: Element, startIndex = 0): number {
   }
 
   walk(el)
+
+  if (spoken) el.setAttribute('aria-label', spoken)
+
   return index - startIndex
 }

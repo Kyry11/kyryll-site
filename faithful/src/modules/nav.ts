@@ -8,9 +8,11 @@
  *     // linear version with no cap based on my MacBook Air 13' inch and MacBook Pro 17'
  *
  * That formula pins the nav to the bottom of the viewport by regression
- * through two laptops the author happened to own. It goes negative under
- * 832px tall and unbounded on a big display. Replaced with the layout rule it
- * was approximating, which holds at every height.
+ * through two laptops the author happened to own, and goes negative below
+ * 832px tall. It is kept verbatim — it is load-bearing for how the scenes are
+ * framed, and no cleaner rule reproduces the same composition. The only change
+ * is clamping it at zero, which is the branch the original had commented out
+ * directly above it.
  *
  * Everything else is a faithful port — same history entries, same `.important`
  * and `.scrolled` bookkeeping — except that both scroll durations are longer
@@ -32,6 +34,19 @@ const VERTICAL_MS = 3200
 const HORIZONTAL_MS = 2200
 
 let currentSection: SectionId = 'intro'
+
+/*
+ * Bumped whenever a new scroll starts, so any frame loop still running from a
+ * previous one sees a stale token and stands down. jQuery.scrollTo, which the
+ * original used, stopped the in-flight animation for you; a bare rAF loop does
+ * not, and two of them writing window.scrollY from different origins toward
+ * different targets makes the page visibly oscillate for the rest of the
+ * duration.
+ */
+let scrollToken = 0
+
+/** The same guard for the horizontal pane cycler. */
+let paneToken = 0
 
 export function setupNav(): void {
   positionNavBlocks()
@@ -83,8 +98,11 @@ function applyScrollLock(): void {
 
 /**
  * Each scene is 1000px tall but the nav should sit near the bottom of whatever
- * viewport it is in, so the copy underneath it clears the treeline. The
- * original regressed this from two specific laptops; this derives it.
+ * viewport it is in, so the copy underneath it clears the treeline.
+ *
+ * The constants are the original's, unchanged. Clamped at zero because the
+ * expression goes negative below 832px tall, which the 2012 code guarded
+ * against with a capped variant it left commented out.
  */
 function positionNavBlocks(): void {
   const navs = $$('.nav')
@@ -93,8 +111,6 @@ function positionNavBlocks(): void {
     return
   }
 
-  // Nav block is ~111px tall and wants to end roughly 40% down the viewport,
-  // leaving the content beneath it inside the visible area at any height.
   const margin = Math.max(0, window.innerHeight * 0.293 - 243.679)
 
   for (const nav of navs) nav.style.marginBottom = `${margin}px`
@@ -269,17 +285,18 @@ function animateWindowScroll(toTop: number): void {
   const fromTop = window.scrollY
   if (Math.abs(toTop - fromTop) < 1) return
 
+  const token = ++scrollToken
   const start = performance.now()
   let done = false
 
   const settle = (): void => {
-    if (done) return
+    if (done || token !== scrollToken) return
     done = true
     window.scrollTo(0, toTop)
   }
 
   const step = (now: number): void => {
-    if (done) return
+    if (done || token !== scrollToken) return
 
     const t = Math.min(1, (now - start) / VERTICAL_MS)
     // Ease in and out, so departure and arrival are both unhurried.
@@ -314,19 +331,20 @@ function animateScroll(el: HTMLElement, toLeft: number, toTop: number): void {
 
   const fromLeft = el.scrollLeft
   const fromTop = el.scrollTop
+  const token = ++paneToken
   const start = performance.now()
 
   let done = false
 
   const settle = (): void => {
-    if (done) return
+    if (done || token !== paneToken) return
     done = true
     el.scrollLeft = toLeft
     el.scrollTop = toTop
   }
 
   const step = (now: number): void => {
-    if (done) return
+    if (done || token !== paneToken) return
 
     const t = Math.min(1, (now - start) / HORIZONTAL_MS)
     // swing easing, jQuery's default and what the original inherited
@@ -346,4 +364,3 @@ function animateScroll(el: HTMLElement, toLeft: number, toTop: number): void {
   setTimeout(settle, HORIZONTAL_MS + 120)
 }
 
-export { VERTICAL_MS }

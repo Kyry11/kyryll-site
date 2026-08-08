@@ -229,4 +229,41 @@ function setupCanvasDebug(): void {
   }, 500)
 }
 
-void boot()
+/*
+ * Nothing above may take the page down with it.
+ *
+ * #content and #container ship with `hidden` and are only unhidden inside
+ * boot(), so any throw before that point left a permanently black page — and
+ * there are real ways to throw: history.replaceState raises SecurityError in
+ * an opaque origin, such as a sandboxed iframe without allow-same-origin.
+ *
+ * Two comments elsewhere argued that applying the scroll lock from script
+ * meant a JS failure would "degrade to an ordinary scrollable page". That was
+ * not true while a failure meant no page at all. It is true now.
+ */
+void boot().catch((error: unknown) => {
+  console.error('kyryll.com: opening sequence failed, showing the site directly', error)
+  revealWithoutSequence()
+})
+
+/** Last resort: no intro, no animation, but a readable, scrollable site. */
+function revealWithoutSequence(): void {
+  document.getElementById('loading-splash')?.remove()
+  document.documentElement.removeAttribute('data-scroll-lock')
+
+  if (content) {
+    content.hidden = false
+    content.style.opacity = '1'
+  }
+
+  if (container) {
+    container.hidden = false
+    container.setAttribute('data-visible', '')
+  }
+
+  const clouds = document.getElementById('clouds')
+  if (clouds) {
+    clouds.style.transition = 'none'
+    clouds.style.backgroundColor = 'transparent'
+  }
+}

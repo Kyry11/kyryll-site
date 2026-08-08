@@ -273,12 +273,11 @@ async function foldIntoEnvelope(form: HTMLFormElement, fieldset: HTMLFieldSetEle
     await Promise.all(
       folding.map((tile) => {
         tile.style.transformOrigin = step.origin(cellWidth, cellHeight)
-        return tile
-          .animate(
-            [{ transform: 'none' }, { transform: `rotate${step.axis}(${step.degrees}deg)` }],
-            { duration: step.duration, easing: 'cubic-bezier(0.6, 0.04, 0.98, 0.34)', fill: 'forwards' },
-          )
-          .finished.then(() => tile.remove())
+        const anim = tile.animate(
+          [{ transform: 'none' }, { transform: `rotate${step.axis}(${step.degrees}deg)` }],
+          { duration: step.duration, easing: 'cubic-bezier(0.6, 0.04, 0.98, 0.34)', fill: 'forwards' },
+        )
+        return settled(anim, step.duration).then(() => tile.remove())
       }),
     )
 
@@ -308,7 +307,25 @@ function showPlate(face: HTMLElement, src: string, cellWidth: number, cellHeight
  * autoRotate; these are the same waypoints as keyframes, with the rotation
  * baked in per point rather than derived from the tangent.
  */
-function flyAway(face: HTMLElement): Promise<Animation> {
+/**
+ * Resolves when the animation finishes — or when its nominal duration has
+ * elapsed, whichever comes first.
+ *
+ * Animation timelines freeze while a document is not being rendered, so
+ * `finished` alone never settles in a backgrounded tab. dom.ts avoids awaiting
+ * it at all for that reason; here the animations are genuinely worth watching,
+ * so they are still driven by the compositor and merely backstopped. Without
+ * this, submitting the form and switching tabs left the fieldset hidden and the
+ * tiles frozen mid-flight until you came back.
+ */
+function settled(anim: Animation, duration: number): Promise<void> {
+  return Promise.race([
+    anim.finished.then(() => undefined).catch(() => undefined),
+    wait(duration + 120),
+  ])
+}
+
+function flyAway(face: HTMLElement): Promise<void> {
   const frames = [
     { x: 100,             y: 100,             rx: 0,             ry: 0 },
     { x: 500,             y: -50,             rx: rand(-30, 30), ry: rand(-5, 5) },
@@ -321,12 +338,16 @@ function flyAway(face: HTMLElement): Promise<Animation> {
 
   face.style.transformOrigin = '50% 50%'
 
-  return face.animate(
+  const duration = rand(7, 15) * 1000
+
+  const anim = face.animate(
     frames.map((f) => ({
       transform: `translate(${f.x}px, ${f.y}px) rotateX(${f.rx}deg) rotateY(${f.ry}deg)`,
     })),
-    { duration: rand(7, 15) * 1000, easing: 'ease-in-out', fill: 'forwards' },
-  ).finished
+    { duration, easing: 'ease-in-out', fill: 'forwards' },
+  )
+
+  return settled(anim, duration)
 }
 
 /* ---- cancel: shatter ---------------------------------------------------- */
@@ -359,8 +380,22 @@ function shatter(form: HTMLFormElement, fieldset: HTMLFieldSetElement): Promise<
 
   return new Promise((resolve) => {
     const start = performance.now()
+    let finished = false
+
+    const done = (): void => {
+      if (finished) return
+      finished = true
+      resolve()
+    }
+
+    // Same reasoning as settled(): rAF does not run in a hidden tab, and
+    // without this the form would never be restored. The flight covers
+    // `totalTime` units at ten per second, so two seconds plus a margin.
+    setTimeout(done, (totalTime / 10) * 1000 + 400)
 
     const step = (now: number): void => {
+      if (finished) return
+
       // The original advanced t by 0.10 every 10 ms — ten time units per real
       // second — so the 20-unit flight lasts two seconds.
       const t = ((now - start) / 1000) * 10
@@ -376,11 +411,8 @@ function shatter(form: HTMLFormElement, fieldset: HTMLFieldSetElement): Promise<
         tile.style.translate = `${x}px ${-y}px`
       }
 
-      if (t <= totalTime) {
-        requestAnimationFrame(step)
-      } else {
-        resolve()
-      }
+      if (t <= totalTime) requestAnimationFrame(step)
+      else done()
     }
 
     requestAnimationFrame(step)

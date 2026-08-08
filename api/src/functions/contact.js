@@ -32,6 +32,13 @@ const LIMITS = {
  */
 const RATE_WINDOW_MS = 60 * 60 * 1000
 const RATE_MAX = 5
+
+/*
+ * Bounded, because the key is attacker-influenced. Without a ceiling a caller
+ * cycling addresses grows this without limit, and the sweep below — which
+ * walks every key on every request — gets more expensive the harder they try.
+ */
+const RATE_MAX_KEYS = 10_000
 const seen = new Map()
 
 app.http('contact', {
@@ -39,11 +46,30 @@ app.http('contact', {
   authLevel: 'anonymous',
   route: 'contact',
   handler: async (request, context) => {
+    /*
+     * Reject anything that is not a JSON object *before* reading properties
+     * off it. `JSON.parse` accepts bare literals, so a body of exactly `null`
+     * parses successfully and then throws on the first property access — an
+     * unhandled exception on a public endpoint from a four-byte payload.
+     */
+    const contentType = request.headers.get('content-type') ?? ''
+    if (!contentType.includes('application/json')) {
+      return json(415, { message: 'Expected application/json' })
+    }
+
+    if (!sameOrigin(request)) {
+      return json(403, { message: 'Cross-origin submissions are not accepted' })
+    }
+
     let body
     try {
       body = await request.json()
     } catch {
       return json(400, { message: 'Expected a JSON body' })
+    }
+
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      return json(400, { message: 'Expected a JSON object' })
     }
 
     // Honeypot. The form ships a field no human sees; anything that fills it
@@ -137,19 +163,70 @@ function validate(fields) {
   return null
 }
 
+/**
+ * The caller's IP, as far as it can be trusted.
+ *
+ * Not the leftmost X-Forwarded-For entry, which is whatever the client chose
+ * to send: a fresh value per request lands in a fresh rate-limit bucket and
+ * the limit never fires. Azure's own `x-azure-clientip` is set by the front
+ * end and cannot be spoofed from outside, so it wins; failing that, the
+ * *rightmost* XFF entry is the one appended by the nearest trusted proxy.
+ */
 function clientIp(request) {
+  const azure = request.headers.get('x-azure-clientip')
+  if (azure) return azure.trim()
+
   const forwarded = request.headers.get('x-forwarded-for')
-  if (forwarded) return forwarded.split(',')[0].trim()
-  return request.headers.get('x-azure-clientip') ?? 'unknown'
+  if (forwarded) {
+    const hops = forwarded.split(',').map((h) => h.trim()).filter(Boolean)
+    if (hops.length > 0) return hops[hops.length - 1]
+  }
+
+  return 'unknown'
+}
+
+/**
+ * CORS stops a hostile page *reading* the response; it does not stop the
+ * request arriving. A form post with `content-type: text/plain` is a "simple"
+ * request that skips preflight entirely, so without this any page could make
+ * its visitors send mail from their own addresses and IPs — spreading the
+ * load across exactly the dimension the rate limiter keys on.
+ *
+ * Requests with no Origin at all (curl, server-side callers) are allowed
+ * through; they are not the CSRF case, and they still face validation and the
+ * rate limit.
+ */
+function sameOrigin(request) {
+  const origin = request.headers.get('origin')
+  if (!origin) return true
+
+  try {
+    const from = new URL(origin).host
+    const host = request.headers.get('host')
+    if (host && from === host) return true
+    // Vite serves the front end from another port during development.
+    return /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(from)
+  } catch {
+    return false
+  }
 }
 
 function rateLimited(ip) {
   const now = Date.now()
 
   for (const [key, times] of seen) {
-    const recent = times.filter((t) => now - t < RATE_WINDOW_MS)
-    if (recent.length === 0) seen.delete(key)
-    else seen.set(key, recent)
+    // Timestamps are appended in order, so the first one still inside the
+    // window marks where the live entries begin.
+    const cut = times.findIndex((t) => now - t < RATE_WINDOW_MS)
+    if (cut === -1) seen.delete(key)
+    else if (cut > 0) times.splice(0, cut)
+  }
+
+  // Map iterates in insertion order, so the front is the oldest bucket.
+  while (seen.size >= RATE_MAX_KEYS) {
+    const oldest = seen.keys().next()
+    if (oldest.done) break
+    seen.delete(oldest.value)
   }
 
   const times = seen.get(ip) ?? []

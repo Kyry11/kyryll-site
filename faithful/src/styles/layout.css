@@ -170,19 +170,53 @@
  * nowhere else. On the desktop the track simply starts, so a 100px icon
  * planted in the middle of the scene is just something in the way.
  *
- * `display: none`, which is literally what .toggle(false) does, and not the
- * `opacity: 0` this had before. That lost: both `#sound:hover` and
- * `#sound[aria-pressed='true']` are (1,1,0) selectors and outrank a bare
- * `#sound` at (1,0,0) whatever the media query, so the icon faded straight
- * back in the moment the track started playing. Specificity does not care
- * which rule you wrote last.
+ * Taken out of the layout entirely rather than hidden with `opacity: 0`, which
+ * is what this had before and which lost: `#sound:hover` and
+ * `#sound[aria-pressed='true']` are both (1,1,0) selectors and outrank a bare
+ * `#sound` at (1,0,0) whatever the media query, so the icon faded straight back
+ * in the moment the track started playing. Specificity does not care which rule
+ * you wrote last.
  *
- * Desktop keeps a mute on the space bar — see audio.ts. Nothing is rendered
- * for it, so the scene stays as the original had it.
+ * Not `display: none`, though. Audio starts by itself here, and WCAG 1.4.2
+ * wants a way to stop it that does not depend on knowing a secret key — the
+ * space bar is real (see audio.ts) but nobody can discover it. So the control
+ * is clipped out of the picture while remaining in the tab order, and it comes
+ * back the moment it takes focus. Visually the scene is exactly as the original
+ * had it; a keyboard user is one Tab away from a real, labelled control.
  */
 @media (min-width: 1001px) {
-  #sound {
-    display: none;
+  /*
+   * Matched via [aria-pressed] rather than the bare id.
+   *
+   * This is the second time these rules have been written and the first
+   * version lost the same way: `#sound:hover` and `#sound[aria-pressed='true']`
+   * are (1,1,0), so a plain `#sound` at (1,0,0) never beat them no matter how
+   * late it appeared or that it sat inside a media query. The attribute is
+   * always present — it is in the markup and reflect() keeps it current — so
+   * `#sound[aria-pressed]` ties at (1,1,0) and wins on order, and adding
+   * :hover or :focus-visible takes it to (1,2,0), above both.
+   */
+  #sound[aria-pressed],
+  #sound[aria-pressed]:hover {
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    padding: 0;
+    clip-path: inset(50%);
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
+    transform: none;
+  }
+
+  #sound[aria-pressed]:focus-visible {
+    width: 100px;
+    height: 100px;
+    margin-left: -50px;
+    clip-path: none;
+    overflow: visible;
+    opacity: 1;
+    pointer-events: auto;
   }
 }
 
@@ -475,6 +509,29 @@
   left: 83px;
   z-index: 25;
 }
+
+/*
+ * Five declarations that were inline `style=` attributes in the 2012 markup.
+ *
+ * They have to live here, not there: the Content-Security-Policy sets
+ * `style-src 'self'` with no `'unsafe-inline'`, which also governs style
+ * *attributes*. Left inline they were silently dropped in production — the two
+ * float clears meant body copy wrapped up beside the portrait on the
+ * Professional and Hobby panes, and two logos rendered at natural size.
+ *
+ * Weakening the CSP to accommodate five declarations would have been the wrong
+ * trade.
+ */
+.section .sub p.clears {
+  clear: left;
+}
+
+.sub img.no-frame {
+  border: none;
+}
+
+.sub img.w-250 { width: 250px; }
+.sub img.w-300 { width: 300px; }
 
 /* ---- ticked lists ------------------------------------------------------- */
 

@@ -69,8 +69,14 @@ export function createAudio(): Audio {
   let wantsTrack = false
   let armed = false
 
+  /*
+   * The control reflects *intent*, not whether audio happens to be coming out
+   * right now. The track is not due until the firework display ends, and a
+   * button that reads "off" for the first thirteen seconds — then flips on its
+   * own — describes the machine rather than the choice.
+   */
   function reflect(): void {
-    button?.setAttribute('aria-pressed', String(playing))
+    button?.setAttribute('aria-pressed', String(!muted))
   }
 
   reflect()
@@ -109,15 +115,25 @@ export function createAudio(): Audio {
   }
 
   function toggle(): void {
-    if (playing) {
+    /*
+     * Branches on `muted`, not on `playing`.
+     *
+     * Keying off `playing` meant that pressing this before the track was due —
+     * anywhere in the ~13 s the opening display runs — took the else-branch and
+     * started the music *immediately*. The one control offered for stopping
+     * audio turned it on instead, eight seconds early.
+     */
+    muted = !muted
+
+    if (muted) {
+      // Unconditional: the track may not have started yet, and the point is
+      // that it must not start later either.
       bed.pause()
       playing = false
-      muted = true
     } else {
-      muted = false
-      // Pressing the speaker is itself the gesture, and is also a request to
-      // hear it now rather than waiting for a cue that may have passed.
-      wantsTrack = true
+      // Deliberately does not set `wantsTrack`. Un-muting says "let me hear
+      // it", not "skip the cue" — if the display is still running, the track
+      // still waits for it.
       tryStart()
     }
 
@@ -188,15 +204,35 @@ export function createAudio(): Audio {
     playFireworkStabs(): void {
       if (muted) return
 
+      /*
+       * One element, reused. The original played a Howler sprite off a single
+       * decoded buffer; constructing four `Audio(bed.src)` instead pulled the
+       * whole 3.6 MB track down again for each 1.9 s stab, and `pause()` alone
+       * never released them.
+       *
+       * Reusing one element means the stabs cannot overlap — at 1000/1300/1800
+       * ms against a 1900 ms tail they would have anyway, so this also stops
+       * three copies of the same opening bar playing over each other.
+       */
+      const stab = new window.Audio(bed.src)
+      stab.volume = 0.4
+      stab.preload = 'auto'
+
       for (const delay of [0, 1000, 1300, 1800]) {
         setTimeout(() => {
           if (muted) return
-          const stab = new window.Audio(bed.src)
-          stab.volume = 0.4
+          stab.currentTime = 0
           void stab.play().catch(() => undefined)
-          setTimeout(() => stab.pause(), FIREWORK_MS)
         }, delay)
       }
+
+      setTimeout(() => {
+        stab.pause()
+        // Drop the buffer rather than leaving a decoded copy of the track
+        // parked for the life of the page.
+        stab.removeAttribute('src')
+        stab.load()
+      }, 1800 + FIREWORK_MS)
     },
 
     startTrack(): void {

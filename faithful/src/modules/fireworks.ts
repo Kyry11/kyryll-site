@@ -9,12 +9,20 @@
  * Clicking the sky launches one at that point, and dragging trails them from
  * the bottom of the screen — the canvas is interactive, exactly as it was.
  *
- * Ported from the 2012 fireworks.js with every tuning constant intact. The one
- * change is lifecycle, not looks. The original ran its frame loop forever,
- * including in background tabs and long after the last spark had faded. This
- * sleeps when the sky is empty and wakes on the next launch, so the canvas can
- * stay for the life of the page — which it must, or clicking the sky would
- * stop working once the opening display finished.
+ * Ported from the 2012 fireworks.js. Three things differ, all deliberate and
+ * all noted where they happen:
+ *
+ *   - the tuning constants are slower, so the display can be watched rather
+ *     than merely noticed (see the TUNING block below, which lists the
+ *     originals alongside)
+ *   - the frame loop sleeps when the sky is empty instead of running forever,
+ *     which is what lets the canvas stay for the life of the page — and it
+ *     must stay, or clicking the sky would stop working once the opening
+ *     display finished
+ *   - sparks blown off screen are now destroyed. In the original `p.radius`
+ *     was never assigned, so the offscreen test compared against NaN and
+ *     always passed; particles died only by alpha decay, and one blown above
+ *     the top of the window could fall back into view
  */
 
 import { isNarrow, rand } from './dom'
@@ -84,6 +92,9 @@ const LINE_WIDTH = 1
 
 /** Gap between rockets in the opening display. The original used 100 ms. */
 const DISPLAY_INTERVAL_MS = 190
+
+/** How far left of the bridge the second cluster sits. From the original. */
+const CITY_OFFSET_X = 500
 
 /**
  * Frames to keep drawing after the last spark dies.
@@ -158,7 +169,7 @@ export function startFireworks(onDisplayEnd?: () => void): () => void {
    * Launch from the bridge, to a point picked over the bridge. This is the
    * unattended display.
    */
-  function launch(): void {
+  function launch(offsetX = 0): void {
     // The bridge occupies roughly the right third of the background plate.
     const left = (cw / 3) * 2 - 150
     const right = cw - 150
@@ -168,7 +179,19 @@ export function startFireworks(onDisplayEnd?: () => void): () => void {
     const targetY = rand(50, ch / 2) - 50
     const targetX = startX - left < right - startX ? rand(left, startX) : rand(startX, right)
 
-    launchFrom(startX, startY, targetX, targetY)
+    launchFrom(startX + offsetX, startY, targetX + offsetX, targetY)
+  }
+
+  /**
+   * The second cluster, over the city rather than the bridge.
+   *
+   * The original fired one of these for every fifth rocket of the display,
+   * offset 500px to the left and aimed 100px lower — so the finale played out
+   * across two parts of the skyline at once. An earlier pass here dropped it
+   * silently while repurposing that `i % 5` branch to cycle the hue.
+   */
+  function launchOverCity(): void {
+    launch(-CITY_OFFSET_X)
   }
 
   /**
@@ -474,17 +497,27 @@ export function startFireworks(onDisplayEnd?: () => void): () => void {
 
   const timers: number[] = []
 
-  // Opening salvo: ten rockets at once.
-  for (let i = 0; i < 10; i++) launch()
+  // Opening salvo: ten rockets at once, a second in — the original delayed
+  // these too, and firing them synchronously made the show start early.
+  timers.push(
+    window.setTimeout(() => {
+      for (let i = 0; i < 10; i++) launch()
+    }, 1000),
+  )
 
-  // Then fifty more, cycling hue every fifth.
+  // Then fifty more.
   timers.push(
     window.setTimeout(() => {
       for (let i = 0; i < 50; i++) {
         timers.push(
           window.setTimeout(() => {
-            if (i % 5 === 0) currentHue = rand(0, 360)
+            // The original re-rolled the hue for every rocket, not every fifth.
+            currentHue = rand(0, 360)
             launch()
+
+            // And every fifth one was doubled, over the city.
+            if (i % 5 === 0) launchOverCity()
+
             // Last one away: from here, an empty sky means the display is over.
             if (i === 49) launchesScheduled = true
           }, i * DISPLAY_INTERVAL_MS),
@@ -493,6 +526,8 @@ export function startFireworks(onDisplayEnd?: () => void): () => void {
     }, 1000),
   )
 
+  // As with the flock's stop(): nothing calls this, because the canvas has to
+  // outlive the display for the click-to-launch to keep working. Unexercised.
   const stop = (): void => {
     cancelAnimationFrame(frame)
     idle = true
@@ -510,8 +545,14 @@ export function startFireworks(onDisplayEnd?: () => void): () => void {
     if (document.hidden) {
       cancelAnimationFrame(frame)
       idle = true
-    } else if (rockets.length > 0 || particles.length > 0) {
-      // Something was mid-flight when the tab went away; pick it back up.
+    } else if (rockets.length > 0 || particles.length > 0 || (launchesScheduled && !displayEnded)) {
+      /*
+       * Also restarts when the sky is already empty but the display has not
+       * been declared over. Hiding the tab inside the ~1.5 s settle window
+       * cancelled the loop with both arrays empty, so nothing ever set
+       * displayEnded — and the ambient track, which waits on that callback,
+       * never started for the rest of the session.
+       */
       ensureRunning()
     }
   }

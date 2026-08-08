@@ -28,9 +28,15 @@ jobs:
     name: Build and deploy
 
     steps:
-      - uses: actions/checkout@v4
+      # Actions are pinned to commit SHAs, not floating tags. A tag can be
+      # repointed by whoever owns the action, and one of these is handed the
+      # deployment token.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Do not leave a usable credential in .git/config for later steps.
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
           cache: npm
@@ -47,7 +53,7 @@ jobs:
       # Deploys the built site plus the managed functions in api/.
       # A pull request gets its own preview URL automatically.
       - name: Deploy to Azure Static Web Apps
-        uses: Azure/static-web-apps-deploy@v1
+        uses: Azure/static-web-apps-deploy@1a947af9992250f3bc2e68ad0754c0b0c11566c9 # v1
         with:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
           repo_token: ${{ secrets.GITHUB_TOKEN }}
@@ -64,7 +70,7 @@ jobs:
 
     steps:
       - name: Close staging environment
-        uses: Azure/static-web-apps-deploy@v1
+        uses: Azure/static-web-apps-deploy@1a947af9992250f3bc2e68ad0754c0b0c11566c9 # v1
         with:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
           action: close

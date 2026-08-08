@@ -43,6 +43,7 @@ import {
   BufferAttribute,
   BufferGeometry,
   DoubleSide,
+  SRGBColorSpace,
   Mesh,
   MeshBasicMaterial,
   PerspectiveCamera,
@@ -460,8 +461,12 @@ export function startFlock(): Flock | null {
       boid.run(boids)
 
       // Depth fog: birds further back wash out toward the sky.
+      //
+      // SRGBColorSpace explicitly: three defaults setRGB to the linear working
+      // space and converts on output, so a mid-grey of 0.5 would land at ~0.735
+      // on screen. The 2012 CanvasRenderer wrote the value straight through.
       const shade = (500 - boid.position.z) / 1000
-      bird.material.color.setRGB(shade, shade, shade)
+      bird.material.color.setRGB(shade, shade, shade, SRGBColorSpace)
 
       bird.position.copy(boid.position)
       bird.rotation.y = Math.atan2(-boid.velocity.z, boid.velocity.x)
@@ -486,10 +491,16 @@ export function startFlock(): Flock | null {
 
   // Suspend the loop when the tab is hidden — otherwise it keeps a GPU busy
   // in a background tab indefinitely.
+  let idle = false
+
   const onVisibility = (): void => {
     if (document.hidden) {
       cancelAnimationFrame(frame)
-    } else {
+      idle = true
+    } else if (idle) {
+      // Guarded, as fireworks.ts guards its own loop: scheduling a second
+      // chain would fly the flock at double speed with only one id to cancel.
+      idle = false
       frame = requestAnimationFrame(tick)
     }
   }
@@ -497,6 +508,12 @@ export function startFlock(): Flock | null {
 
   frame = requestAnimationFrame(tick)
 
+  /*
+   * Nothing calls stop() today — the flock is meant to last as long as the
+   * page. It is kept as the counterpart to startFlock, and deliberately noted
+   * as unexercised: if a future caller needs it, verify it rather than trusting
+   * it, because this path has never run.
+   */
   running = {
     stop(): void {
       cancelAnimationFrame(frame)

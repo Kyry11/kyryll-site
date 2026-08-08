@@ -41,11 +41,15 @@ None of them belong in this repository.
 | `CONTACT_SENDER_ADDRESS` | Verified sender, e.g. `donotreply@<your-domain>` |
 | `CONTACT_RECIPIENT_ADDRESS` | Where messages land, e.g. `info@kyryll.com` |
 
-Setting them from the CLI:
+Set them in the portal, or from the CLI reading the connection string out of
+the resource rather than typing it:
 
 ```bash
-az staticwebapp appsettings set --name <swa-name> --setting-names COMMUNICATION_SERVICES_CONNECTION_STRING="<connection-string>" CONTACT_SENDER_ADDRESS="donotreply@<domain>" CONTACT_RECIPIENT_ADDRESS="info@kyryll.com"
+az staticwebapp appsettings set --name <swa-name> --setting-names COMMUNICATION_SERVICES_CONNECTION_STRING="$(az communication list-key --name <acs-name> --resource-group <rg> --query primaryConnectionString -o tsv)" CONTACT_SENDER_ADDRESS="donotreply@<domain>" CONTACT_RECIPIENT_ADDRESS="info@kyryll.com"
 ```
+
+Written this way the secret is never a literal in the command, so it does not
+land in shell history or in the arguments other users can read from `ps`.
 
 Until they are set the endpoint returns 500 and the form shows "Could not
 reach the server". That is the same message the original showed, so nothing
