@@ -1,0 +1,73 @@
+/*
+ * The original shipped each face in eot/svg/ttf/otf/woff. woff alone covers
+ * every browser released since ~2012, so the other four formats were dropped:
+ * 624 KB of fonts instead of 3.4 MB.
+ *
+ * font-display: swap keeps text readable while the faces load. The cold open
+ * is the one exception — it preloads Baskerville-Regular in the document head
+ * because the whole effect is that specific dictionary typeface.
+ */
+
+@font-face {
+  font-family: 'Baskerville';
+  src: url('/fonts/Baskerville-Regular.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Baskerville';
+  src: url('/fonts/Baskerville-Bold.woff') format('woff');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Baskerville';
+  src: url('/fonts/Baskerville-Italic.woff') format('woff');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Chennai';
+  src: url('/fonts/chennai-light.woff') format('woff');
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Chennai';
+  src: url('/fonts/chennai-regular.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Chennai';
+  src: url('/fonts/chennai-bold.woff') format('woff');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Quicksand';
+  src: url('/fonts/Quicksand-Bold.woff') format('woff');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Segoe Print';
+  src: url('/fonts/Segoe-Print.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}

@@ -1,0 +1,210 @@
+/*
+ * The contact form, and the two ways it can end.
+ *
+ * "Send Message" folds it into an envelope that flies off screen; "Shatter
+ * Form" launches all 25 tiles as ballistic projectiles. Both animations work
+ * on clones of the form (`.clipped`) that are clipped to a grid, exactly as
+ * the original did — see contact.ts.
+ */
+
+#contactform {
+  position: relative;
+  float: left;
+  clear: both;
+  width: 330px;
+  height: 340px;
+  margin: 10px 0 0 20px;
+  perspective: 250px;
+}
+
+#contactfieldset {
+  position: relative;
+  z-index: 100;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  transition: opacity 0.6s ease;
+}
+
+#contactfieldset[data-hidden] {
+  display: none;
+}
+
+#contactform legend {
+  margin: 10px 0 0 6px;
+  padding: 0;
+}
+
+#contactform p {
+  clear: left;
+  opacity: 1;
+  background: var(--panel);
+  padding: 6px 6px 0;
+  margin: 0;
+  position: relative;
+}
+
+#contactform p.secondtolast { padding: 6px; }
+#contactform p.last         { padding: 0 6px 6px; display: flex; gap: 6px; }
+
+/*
+ * Labels.
+ *
+ * The placeholder is the visible cue, which is how the form looked at rest in
+ * 2012 — the label_better plugin only slid a label out to the *left of the
+ * form* on focus, into the page margin, which is not an effect worth
+ * reproducing. But a placeholder is not an accessible name, so a real label
+ * stays in the markup for assistive technology and is hidden visually.
+ *
+ * The previous attempt at a floating label rendered both at once: the rule
+ * meant to hide it was `input:placeholder-shown + .lb_label`, an adjacent
+ * sibling selector, while the label sits *before* the input in the markup. It
+ * never matched, so every field read "Nlaomnee".
+ */
+#contactform .lb_label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/*
+ * Fields and buttons fill their row, so every left and right edge in the form
+ * lines up. The 2012 rule was `width: 300px` on fields and `150px` on the two
+ * buttons; under content-box those buttons came to 172px each, and two of them
+ * plus a 6px gap is 350px inside a 330px form — they overhung the fields on
+ * the right, which is the ragged edge in the form as it stood.
+ */
+#contactform input,
+#contactform textarea,
+#contactform button {
+  box-sizing: border-box;
+}
+
+#contactform input,
+#contactform textarea {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  padding: 2px;
+  border: 1px solid #333;
+  background: var(--field);
+  color: #fff;
+  font: 700 1em/1.5 'Quicksand', 'Chennai', sans-serif;
+}
+
+#contactform textarea {
+  resize: vertical;
+}
+
+#contactform input:hover,
+#contactform textarea:hover,
+#contactform input:focus,
+#contactform textarea:focus {
+  background: var(--field-hover);
+}
+
+#contactform input:focus,
+#contactform textarea:focus {
+  color: #fff;
+  outline: 2px solid rgba(255, 255, 255, 0.8);
+  outline-offset: 1px;
+}
+
+#contactform input::placeholder,
+#contactform textarea::placeholder {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+/* Set by contact.ts when a field fails validation. */
+#contactform [data-invalid] {
+  border-color: #dd0000;
+  animation: rumble 0.14s linear 0s 24;
+}
+
+/* Replaces the jrumble plugin. */
+@keyframes rumble {
+  0%   { transform: translate(0, 0) rotate(0deg); }
+  25%  { transform: translate(3px, 2px) rotate(1deg); }
+  50%  { transform: translate(0, -2px) rotate(0deg); }
+  75%  { transform: translate(-3px, 1px) rotate(-1deg); }
+  100% { transform: translate(0, 0) rotate(0deg); }
+}
+
+#contactform button {
+  /* Share the row evenly rather than each claiming a fixed 150px, so the pair
+     ends flush with the fields above them at any form width. */
+  flex: 1;
+  min-width: 0;
+  padding: 2px 10px;
+  background: var(--field);
+  border: 1px solid #333;
+  font: 700 1em/1.5 'Quicksand', 'Chennai', sans-serif;
+  transition: background 0.2s ease;
+}
+
+#contactform button:hover:not(:disabled) {
+  background: var(--field-hover);
+}
+
+#contactform button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+#contactform #tipsSendMail {
+  min-height: 1.5em;
+  /* Scoped under #contactform deliberately: `#contactform p` is (1,0,1) and
+     outranks a bare `#tipsSendMail` at (1,0,0), so the plain id selector lost
+     and the empty status row drew a panel-coloured strip under the buttons. */
+  background: none;
+  padding: 6px;
+}
+
+/*
+ * Off-screen rather than display:none — a bot reading the DOM sees a normal
+ * field, while nobody using the site (including a screen reader, via the
+ * aria-hidden on the wrapper) ever encounters it.
+ */
+.honeypot {
+  position: absolute !important;
+  left: -9999px;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  padding: 0 !important;
+  background: none !important;
+}
+
+/* ---- teardown animation tiles ------------------------------------------ */
+
+/*
+ * One per grid cell. Each holds a full visual copy of the fieldset, clipped to
+ * its own rectangle, so the assembled grid looks exactly like the intact form
+ * until the pieces start moving independently.
+ */
+.clipped {
+  position: absolute;
+  top: 0;
+  left: 0;
+  backface-visibility: hidden;
+  transform-style: preserve-3d;
+  background: var(--panel);
+}
+
+.clipped * {
+  pointer-events: none;
+}
+
+/* The envelope plate the folding animation resolves into. */
+.clipped[data-envelope] {
+  background-repeat: no-repeat;
+  background-size: contain;
+  background-color: transparent;
+}

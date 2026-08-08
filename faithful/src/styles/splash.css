@@ -1,0 +1,140 @@
+/*
+ * The cold open: the dictionary entry for "technology", revealed letter by
+ * letter on graph paper, then cross-faded away.
+ *
+ * The original drove this with the cooltext jQuery plugin and a chain of four
+ * nested callbacks. The reveal is now CSS animation over spans emitted by
+ * splash.ts; the stagger is a per-letter --i custom property.
+ */
+
+#loading-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  /* Vertically centred, but hard against the left edge — the original used
+     `display: table-cell; vertical-align: middle; text-align: left` with 50px
+     of side padding, and the long unwrapped definition lines are the look. */
+  align-items: center;
+  justify-items: start;
+  background: #fff url('/img/grid.png') repeat fixed;
+  transition: opacity 1.5s ease;
+}
+
+#loading-splash[data-leaving] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.loading-splash-center {
+  width: 100%;
+  padding: 0 50px;
+  text-align: left;
+}
+
+#loading-splash p {
+  margin-bottom: 46px;
+}
+
+#loading-splash p.loading-term {
+  font: 32px 'Times New Roman', Times, serif;
+  color: #777;
+}
+
+#loading-splash span.loading-term,
+#loading-splash p.loading-definition {
+  font: 32px 'Baskerville', 'Baskerville Old Face', Georgia, serif;
+  color: #000;
+}
+
+#loading-splash span.loading-term {
+  font-size: 48px;
+}
+
+#loading-splash p.loading-definition b {
+  font-weight: 700;
+}
+
+#loading-splash p.loading-definition i {
+  font-style: italic;
+}
+
+/*
+ * Emitted by splash.ts, one per character. Letters sit invisible until an
+ * ancestor is marked [data-reveal] — that way the text can be split up front,
+ * while its container is still hidden, without flashing when the reveal is
+ * actually triggered.
+ */
+.ct-letter {
+  display: inline-block;
+  white-space: pre;
+  opacity: 0;
+}
+
+[data-reveal] .ct-letter {
+  animation: ct-reveal 0.75s ease forwards;
+  animation-delay: calc(var(--i) * var(--ct-step, 18ms));
+}
+
+@keyframes ct-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(-0.32em) scale(1.7);
+    filter: blur(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+
+#splash-skip {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  padding: 10px 18px;
+  font: 400 14px/1 'Chennai', Arial, sans-serif;
+  letter-spacing: 0.08em;
+  text-transform: lowercase;
+  color: #555;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid #ccc;
+  border-radius: 999px;
+  transition: color 0.2s ease, border-color 0.2s ease;
+}
+
+#splash-skip:hover {
+  color: #000;
+  border-color: #888;
+}
+
+/* With reduced motion the reveal is pointless — show the definition at once
+   and let the auto-advance carry on. */
+@media (prefers-reduced-motion: reduce) {
+  .ct-letter,
+  [data-reveal] .ct-letter {
+    opacity: 1;
+    animation: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .loading-splash-center {
+    padding: 0 24px;
+  }
+
+  #loading-splash p.loading-term,
+  #loading-splash span.loading-term,
+  #loading-splash p.loading-definition {
+    font-size: 22px;
+  }
+
+  #loading-splash span.loading-term {
+    font-size: 32px;
+  }
+
+  #loading-splash p {
+    margin-bottom: 28px;
+  }
+}

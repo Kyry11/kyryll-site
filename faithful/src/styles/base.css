@@ -1,0 +1,194 @@
+/*
+ * Ported from the 2012 css/kyryll.css.
+ *
+ * The original leaned on a `* { }` reset that set colour, font, and line-height
+ * on every element in the document. That is kept in spirit but scoped, so form
+ * controls and buttons can inherit properly instead of being overridden later.
+ */
+
+:root {
+  /* The original hard-coded these values in a dozen places each. */
+  --stage-width: 977px;
+  --stage-height: 4000px;
+  --scene-height: 1000px;
+
+  --ink: #fff;
+  --ink-dim: rgba(255, 255, 255, 0.9);
+  --panel: rgba(0, 0, 0, 0.4);
+  --panel-strong: rgba(0, 0, 0, 0.6);
+  --field: rgba(255, 255, 255, 0.15);
+  --field-hover: rgba(255, 255, 255, 0.28);
+  --glow: 0 0 3px #333;
+
+  --ease-cycle: cubic-bezier(0.6, 0.04, 0.98, 0.34); /* stand-in for jQuery easeInCirc */
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* The original disabled this entirely; section cycling is JS-driven and
+     needs to stay that way, so smooth scrolling is opted into per-call. */
+  scroll-behavior: auto;
+}
+
+body {
+  margin: 0;
+  font: 400 1.005rem/1.5 'Chennai', Arial, sans-serif;
+  font-size: 85%;
+  color: var(--ink);
+  background-color: #000;
+  position: relative;
+  overflow-x: hidden;
+}
+
+/*
+ * No freeform scrolling — you move between the four scenes through the nav,
+ * and each arrival is animated. This is how the original behaved, and it is
+ * what keeps each scene composed rather than something you drift past.
+ *
+ * Set by nav.ts, never in markup: without script this rule never applies and
+ * the page scrolls normally, so a JS failure degrades to a long page instead
+ * of a viewport-sized dead end. Programmatic scrolling still works under
+ * overflow: hidden, which is what the nav uses.
+ */
+:root[data-scroll-lock] body {
+  /* No height here. `html` has no overflow of its own, so this value is
+     propagated to the viewport and `body` itself computes back to `visible` —
+     the 4000px column still contributes scrollable overflow, it just cannot be
+     reached by wheel or touch. Note `hidden`, not `clip`: hidden boxes remain
+     programmatically scrollable, which the nav depends on. */
+  overflow: hidden;
+}
+
+h1, h2, h3, p, ul, ol, dl, dd, figure, blockquote {
+  margin: 0;
+  padding: 0;
+}
+
+ul, ol {
+  list-style: none;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+  border: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+/*
+ * Selecting text turns it red, with no highlight box at all.
+ *
+ * Straight from the original, which suppressed the background so the night
+ * palette stayed intact and recoloured the glyphs instead. An earlier pass
+ * here replaced it with a conventional white-on-translucent highlight on
+ * readability grounds — which missed that this is the effect, not an
+ * oversight, and that a selection is a transient state the reader is actively
+ * driving.
+ *
+ * Only `::selection`: `::-moz-selection` mattered for Firefox before 62 (2018)
+ * and `::-webkit-selection` was never a real thing. Both are dropped, and they
+ * are kept out of a shared selector list on purpose — one unrecognised
+ * selector in a list invalidates the whole rule.
+ */
+::selection {
+  background: rgba(255, 255, 255, 0);
+  color: red;
+}
+
+/* Keyboard focus was entirely invisible in the original. Everything here is
+   reachable by tab, so it needs to be visible when it is. */
+:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+strong { font-weight: 700; }
+
+span.smiley {
+  display: inline-block;
+  transform: rotate(90deg);
+}
+
+h1, legend {
+  font-size: 1.7em;
+  line-height: 1.5;
+  text-shadow: var(--glow);
+  opacity: 0.9;
+}
+
+h2 {
+  font-size: 1.5em;
+  line-height: 1.5;
+  text-shadow: var(--glow);
+  opacity: 0.9;
+  margin-bottom: 10px;
+}
+
+h3 {
+  font-size: 1.3em;
+  line-height: 1.5;
+  text-shadow: var(--glow);
+}
+
+p {
+  text-shadow: var(--glow);
+  opacity: 0.9;
+  margin-top: 5px;
+}
+
+p a {
+  background: var(--panel);
+  padding: 2px 5px 4px;
+}
+
+p a:hover {
+  background: var(--panel-strong);
+}
+
+blockquote {
+  border-left: 3px solid #fff;
+  font-size: 0.9em;
+  padding: 0 10px;
+  margin-left: 5px;
+  opacity: 0.8;
+}
+
+blockquote p {
+  font-style: italic;
+  margin: 0 0 10px;
+  opacity: 1;
+}
+
+.personal {
+  font-family: 'Segoe Print', 'Chennai', cursive;
+}
+
+/* Respect the OS-level motion preference. Everything below is decorative;
+   the JS side checks the same query before starting the flock and fireworks. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

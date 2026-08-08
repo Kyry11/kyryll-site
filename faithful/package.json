@@ -1,0 +1,21 @@
+{
+  "name": "kyryll-site-faithful",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Faithful port of the 2012 kyryll.com onto a modern toolchain",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/three": "^0.185.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
+  }
+}

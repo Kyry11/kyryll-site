@@ -1,0 +1,288 @@
+/*
+ * The original had no mobile layout at all — it declared
+ * `<meta viewport content="width=1000, user-scalable=no">` and let phones
+ * scale a fixed 1000px canvas down to illegibility, with pinch-zoom disabled.
+ *
+ * Below the stage width the whole thing reflows into a single column: the
+ * absolutely-positioned scenes collapse to one fixed backdrop, the four
+ * sections stack in document order, and the horizontally-cycling panes become
+ * an ordinary vertical scroll. Nothing is hidden — the small screen gets the
+ * same words, just reachable.
+ */
+
+@media (max-width: 1000px) {
+
+  /* The desktop layout puts these back to content-box so the 2012 pixel
+     arithmetic works (see layout.css). Down here everything is fluid and
+     percentage-width, where content-box would make padding overflow. */
+  .section .sub,
+  .subnav a {
+    box-sizing: border-box;
+  }
+
+  body {
+    overflow-x: hidden;
+    /* One night scene behind everything, instead of four stacked plates. */
+    background: #0b1a3a url('/img/bg1.jpg') no-repeat center top / cover fixed;
+  }
+
+  #bg1, #bg2, #bg3, #bg4,
+  #fg,
+  #treeline {
+    display: none;
+  }
+
+  /* No skyline down here, so the footer canvas has nothing to fly in front of.
+     Drop it to the main canvas's level and the flock reads as one continuous
+     layer behind the content instead of half of it jumping in front. */
+  #birdsFooter {
+    z-index: 10;
+  }
+
+  #clouds {
+    position: fixed;
+    inset: 0;
+    height: 100%;
+    opacity: 0.5;
+  }
+
+  #main {
+    position: static;
+  }
+
+  #container {
+    width: 100%;
+    height: auto;
+    /*
+     * Space for the fixed nav.
+     *
+     * max() of a measured value and a static floor, deliberately. --nav-height
+     * is republished by nav.ts as the nav wraps — 68px at 390px wide, 102px at
+     * 320px — but a measurement taken before layout settles can be stale, and
+     * a stale *small* value puts the first heading under the nav. 7rem clears
+     * the widest wrap seen at 320px on its own, so the variable can only ever
+     * add room, never remove it.
+     */
+    padding: max(calc(var(--nav-height, 0px) + 1rem), 7rem) 0 96px;
+  }
+
+  .outer {
+    position: static;
+    width: 100%;
+    padding: 0 16px 56px;
+  }
+
+  /* The nav is repeated inside every section in the markup. On the desktop
+     layout each copy sits with its own scene; stacked, that would be four
+     identical menus down the page, so only the first is kept and it docks. */
+  .outer .nav {
+    display: none;
+  }
+
+  /*
+   * Fixed, not sticky.
+   *
+   * Sticky is bounded by its containing block, and this nav lives inside
+   * #intro — so it stopped following the moment you scrolled into About, and by
+   * the Work section it sat about 3,000px above the viewport. The other three
+   * copies are hidden, so from there on the stacked layout had no navigation at
+   * all. Fixed takes it out of #intro's flow entirely.
+   */
+  #intro .nav {
+    display: flex;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 150;
+    float: none;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 18px;
+    margin: 0 -16px 24px;
+    padding: 10px 16px;
+    background: rgba(0, 0, 0, 0.55);
+    -webkit-backdrop-filter: blur(6px); /* Safari needed this until 18 */
+    backdrop-filter: blur(6px);
+  }
+
+  #intro .nav li {
+    float: none;
+  }
+
+  #intro .nav li a {
+    float: none;
+    width: auto;
+    height: auto;
+    margin: 0;
+    font-size: 22px;
+    line-height: 1.4;
+  }
+
+  #intro .nav li.intro a {
+    flex-basis: 100%;
+    font-size: 34px;
+  }
+
+  /* The nav is fixed, so anything scrolled to must clear it. Covers the
+     sub-panes reached with scrollIntoView; the section links scroll manually
+     and subtract the same clearance in nav.ts. */
+  .outer,
+  .section .sub {
+    /* Same floor-plus-measurement as the column padding above. */
+    scroll-margin-top: max(calc(var(--nav-height, 0px) + 1rem), 7rem);
+  }
+
+  #intro {
+    padding-top: 0;
+  }
+
+  /*
+   * Scoped with #intro / #contact to match the desktop rules they override.
+   *
+   * As bare class selectors these were (0,1,0) and lost outright to
+   * `#intro .welcome` and `#intro .folio` at (1,1,0) in layout.css — being in a
+   * media query changes nothing about specificity. The result on a phone was a
+   * 550px .welcome inside a 390px viewport: the document grew to 586px wide and
+   * `overflow-x: hidden` sliced the copy off, while the surviving desktop
+   * floats collapsed #intro to the height of the nav alone.
+   */
+  #intro .welcome,
+  #intro .folio,
+  .outer .subnav,
+  .outer .content,
+  #contact #contactform,
+  #contact .visitus {
+    float: none;
+    width: 100%;
+    max-width: 100%;
+    margin: 0 0 28px;
+  }
+
+  /* Floats are gone above, but the sections still need to contain what is
+     left, or #intro reports the nav's height and the scenes overlap. */
+  .outer::after {
+    content: '';
+    display: block;
+    clear: both;
+  }
+
+  #intro .welcome p {
+    font-size: 1.15em;
+  }
+
+  #foliothumbs {
+    width: 100%;
+    max-width: 391px;
+    margin-inline: auto;
+  }
+
+  #foliothumbs > div {
+    width: 100%;
+  }
+
+  #intro .folio p {
+    position: static;
+    margin-top: 12px;
+    text-align: center;
+  }
+
+  /* The horizontal cycler becomes a plain vertical stack. */
+  .content {
+    height: auto;
+    overflow: visible;
+  }
+
+  .section {
+    float: none;
+    width: 100%;
+  }
+
+  .section .sub {
+    float: none;
+    width: 100%;
+    height: auto;
+    min-height: 0;
+    margin-bottom: 16px;
+    padding: 16px 16px 52px;
+    overflow: visible;
+    background: var(--panel-strong);
+  }
+
+  .sub img,
+  #work .sub img {
+    float: none;
+    display: block;
+    margin: 0 0 14px;
+  }
+
+  ul.services {
+    float: none;
+    margin: 10px 0;
+  }
+
+  /* The prev/next affordances are what move you between panes on desktop.
+     Stacked, they would just be duplicate anchors to adjacent content. */
+  .next,
+  .previous {
+    display: none;
+  }
+
+  .sitelink {
+    position: static;
+    display: inline-block;
+    margin-bottom: 10px;
+  }
+
+  .subnav,
+  .subnav ul {
+    width: 100%;
+  }
+
+  .subnav li,
+  .subnav a {
+    float: none;
+  }
+
+  .subnav a {
+    width: 100%;
+    font-size: 1.3em;
+  }
+
+  #contactform {
+    height: auto;
+    margin: 0 0 28px;
+  }
+
+  #contactform input,
+  #contactform textarea {
+    /* Anything under 16px makes iOS Safari zoom the viewport on focus. */
+    font-size: 16px;
+    padding: 8px;
+  }
+
+  #contactform button {
+    padding: 10px;
+    font-size: 16px;
+  }
+
+  .visitus {
+    text-align: left;
+  }
+
+  #sound {
+    width: 64px;
+    height: 64px;
+    margin-left: -32px;
+    bottom: 12px;
+  }
+}
+
+/* The teardown animations are absolutely positioned against a 330x340 box and
+   do not survive a fluid form. Below the stage width the form submits without
+   them; contact.ts checks the same breakpoint. */
+@media (max-width: 1000px) {
+  .clipped {
+    display: none;
+  }
+}

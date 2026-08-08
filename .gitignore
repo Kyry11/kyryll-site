@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.DS_Store
+
+# Vite's dependency pre-bundling cache
+.vite/
+
+# Local Azure Functions settings hold the Communication Services connection
+# string. Never commit these.
+local.settings.json
+.env
+.env.*
+!.env.example
+
+# Azure Static Web Apps CLI
+.swa/

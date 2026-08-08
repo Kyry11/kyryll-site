@@ -1,0 +1,18 @@
+{
+  "name": "kyryll-site-api",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Managed Azure Functions for kyryll.com \u2014 contact form delivery",
+  "main": "src/functions/*.js",
+  "scripts": {
+    "start": "func start",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@azure/communication-email": "^1.0.0",
+    "@azure/functions": "^4.6.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
