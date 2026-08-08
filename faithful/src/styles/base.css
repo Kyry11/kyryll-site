@@ -92,11 +92,24 @@ button {
   cursor: pointer;
 }
 
-/* The original suppressed the selection highlight to keep the night palette
-   intact. Kept, but without the unreadable red foreground it also set. */
+/*
+ * Selecting text turns it red, with no highlight box at all.
+ *
+ * Straight from the original, which suppressed the background so the night
+ * palette stayed intact and recoloured the glyphs instead. An earlier pass
+ * here replaced it with a conventional white-on-translucent highlight on
+ * readability grounds — which missed that this is the effect, not an
+ * oversight, and that a selection is a transient state the reader is actively
+ * driving.
+ *
+ * Only `::selection`: `::-moz-selection` mattered for Firefox before 62 (2018)
+ * and `::-webkit-selection` was never a real thing. Both are dropped, and they
+ * are kept out of a shared selector list on purpose — one unrecognised
+ * selector in a list invalidates the whole rule.
+ */
 ::selection {
-  background: rgba(255, 255, 255, 0.25);
-  color: #fff;
+  background: rgba(255, 255, 255, 0);
+  color: red;
 }
 
 /* Keyboard focus was entirely invisible in the original. Everything here is
