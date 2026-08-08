@@ -77,11 +77,29 @@ async function revealMainContent(audio: ReturnType<typeof createAudio>): Promise
   if (!reduced) {
     await wait(3000)
 
-    void import('./modules/fireworks').then(({ startFireworks }) =>
-      // The track proper waits for the sky to go quiet.
-      startFireworks(() => audio.startTrack()),
-    )
+    /*
+     * The track's only cue used to be the display declaring itself over, which
+     * put the whole of the audio behind a dynamically imported chunk and a
+     * rAF loop. A chunk that fails to fetch — one bad response on a flaky
+     * connection — took the sound with it silently and for the rest of the
+     * session, and left the rejection unhandled on top.
+     *
+     * So the cue is now backed by a timer. The display is ~15 s: a second
+     * before the first salvo, another before the fifty-rocket run, fifty at
+     * DISPLAY_INTERVAL_MS, then flight and decay. Twenty-five seconds is past
+     * the end of it with room to spare, and startTrack() is idempotent — the
+     * normal path still starts the music the moment the sky actually goes
+     * quiet, and this only ever fires into a track that is already playing.
+     */
+    void import('./modules/fireworks')
+      .then(({ startFireworks }) => startFireworks(() => audio.startTrack()))
+      .catch((error: unknown) => {
+        console.error('kyryll.com: fireworks failed to load', error)
+        audio.startTrack()
+      })
+
     audio.playFireworkStabs()
+    void wait(25_000).then(() => audio.startTrack())
   }
 
   container.hidden = false

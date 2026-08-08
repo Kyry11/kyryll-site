@@ -1,0 +1,68 @@
+name = "kyryll-site"
+main = "src/index.js"
+# Advance this deliberately, not reflexively: it changes runtime behaviour, and
+# the change is invisible until something breaks in production. The CI dry run
+# checks this file parses and the bindings resolve; it cannot tell you a
+# behavioural flag flipped underneath you. Bump it, run the suite, deploy, and
+# exercise the contact form.
+compatibility_date = "2026-08-01"
+
+# The Worker is the site's only entry point; there is no workers.dev URL to
+# leak an unproxied copy of it.
+workers_dev = false
+
+# Both hostnames are served by the same Worker. kyryll.com is the apex, which
+# is precisely why the site is fetched from storage inside the Worker rather
+# than by pointing a proxied CNAME at it: Azure Storage will only verify a
+# custom domain on a subdomain.
+[[routes]]
+pattern = "kyryll.com/*"
+zone_name = "kyryll.com"
+
+[[routes]]
+pattern = "www.kyryll.com/*"
+zone_name = "kyryll.com"
+
+[vars]
+# The storage account's static-website endpoint, e.g.
+# https://kyryllsite.z8.web.core.windows.net — note `web`, not `blob`.
+#
+# Always supplied as `--var ORIGIN:...`, which overrides this: by the deploy
+# from `primaryEndpoints.web`, and by `npm run dev` from the command line. The
+# placeholder is a deliberate tripwire rather than a usable default — it is
+# non-empty, so it passes the configuration check in static.js and then fails
+# loudly on the first fetch, which is a better failure than silently serving
+# from whatever host happened to be baked into a commit.
+ORIGIN = "__ORIGIN__"
+
+# Rate limiting, one object per IP. See src/ratelimit.js.
+#
+# A Durable Object rather than a KV namespace because read-modify-write over KV
+# is not atomic: under a burst from one IP, every request read the same bucket
+# and every one was admitted. A Durable Object serialises requests per object,
+# which is the property the limiter actually needs.
+#
+# It also needs no id, so nothing has to be substituted into this file and the
+# deploy carries one fewer secret than the previous design did.
+[[durable_objects.bindings]]
+name = "RATE_LIMITER"
+class_name = "RateLimiter"
+
+# SQLite-backed, which is what makes Durable Objects available on the Workers
+# free plan.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RateLimiter"]
+
+# Secrets, set with `wrangler secret put` — never here:
+#   COMMUNICATION_SERVICES_CONNECTION_STRING
+#   CONTACT_SENDER_ADDRESS
+#   CONTACT_RECIPIENT_ADDRESS
+#
+# The recipient is a secret too, deliberately. It is a real inbox and this
+# repository is public.
+#
+# ALLOW_LOCALHOST_ORIGIN is deliberately absent. Setting it to "true" lets a
+# localhost page post to the contact endpoint, which is needed when Vite serves
+# the front end on another port; production must never define it. See
+# sameOrigin() in src/contact.js.

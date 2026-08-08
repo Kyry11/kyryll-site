@@ -6,7 +6,7 @@ it is.
 
 ```
 faithful/   the port: same site, current stack, responsive, accessible
-api/        Azure Function backing the contact form
+worker/     the Cloudflare Worker: serves the site, and the contact API
 ```
 
 The 2012 original is tagged **`original-2012`** rather than kept as a folder —
@@ -47,14 +47,15 @@ What changed is underneath:
 | no build step, nothing minified | Vite + TypeScript, strict mode |
 | `viewport width=1000, user-scalable=no` | responsive, pinch-zoom restored |
 | Universal Analytics (dead since July 2023) | none |
-| contact form POSTing to a host that no longer resolves | `/api/contact`, an Azure Function |
+| contact form POSTing to a host that no longer resolves | `/api/contact`, handled in the Worker |
 | a tracking beacon emailed on every section change | removed |
 | sound `.play()` on load (blocked by every browser since 2017) | starts on the visitor's first interaction; speaker hidden on desktop, as the original did |
 
-**Payload:** 18 KB of app JavaScript (6.9 KB gzipped) plus 502 KB of three.js
-(126 KB gzipped) loaded *after* the opening sequence, so it never blocks first
-paint. The original shipped ~906 KB of unminified JavaScript, all of it
-render-blocking in `<head>`.
+**Payload:** 29 KB of app JavaScript (11 KB gzipped) across three chunks — the
+entry, plus `birds` and `fireworks` split out — and 491 KB of three.js (123 KB
+gzipped) loaded *after* the opening sequence, so none of it blocks first paint.
+The original shipped ~906 KB of unminified JavaScript, all of it render-blocking
+in `<head>`.
 
 ### Things that look like bugs and are not
 
@@ -75,8 +76,11 @@ to mistake for faults:
   always falls below the text panels — load with `?debug` to see it drawn.
 - **The cold open always plays.** Skippable by button, click or Escape, but
   never skipped automatically.
-- **No speaker on desktop.** The original showed it on touch devices only,
-  where a gesture is required before audio can play. Space bar mutes.
+- **No speaker on desktop while the sound is playing.** The original showed it
+  on touch devices only, where a gesture is required before audio can play.
+  Space bar mutes — and the icon reappears whenever the sound is off, because
+  hiding it in *both* states made one stray space bar silence every future
+  visit with nothing on screen to undo it.
 
 ## Running it
 
@@ -96,25 +100,80 @@ npm run build --prefix faithful
 
 ## Deployment
 
-Azure Static Web Apps, behind Cloudflare for DNS and CDN.
-[.github/workflows/deploy.yml](.github/workflows/deploy.yml) builds `faithful/`
-and deploys it with the function in `api/`. Pull requests get their own preview
-URL.
+A Cloudflare Worker in front of an Azure Blob Storage static website.
+[.github/workflows/deploy.yml](.github/workflows/deploy.yml) builds `faithful/`,
+uploads it to the `$web` container, deploys the Worker, and purges the cache.
 
-One secret is required, as a GitHub encrypted secret:
+It is two jobs, and the split is a security boundary rather than tidiness.
+`validate` builds and tests on every trigger and holds **no secrets at all**;
+`deploy` carries the credentials and only comes into existence for a push to
+`master`. A single job with the secrets at job scope exposed them to everything
+it ran — including pull-request code and every package in the install tree —
+and a deploy-time `if:` does nothing about that, because the secrets are already
+on the runner by then. `deploy` names a `production` environment, so the secrets
+can be moved from repository scope to that environment and put behind a required
+reviewer if you ever want it.
 
-- `AZURE_STATIC_WEB_APPS_API_TOKEN` — deployment token from the Static Web App
+The Worker is the whole edge — it serves the build, applies the response
+headers, rewrites unmatched paths to index.html, and hosts `/api/contact`.
+Storage does none of that: it has no compute, and a storage account cannot emit
+an arbitrary response header at all. See [worker/README.md](worker/README.md).
 
-`GITHUB_TOKEN` is provided automatically.
+It replaced Azure Static Web Apps, which bundled all four jobs. The deciding
+constraint was the apex domain: Azure Storage only verifies a custom domain
+through a CNAME on a *subdomain*, so kyryll.com could never be registered on the
+account. Fetching the storage endpoint from inside the Worker sidesteps the
+question — storage only ever sees its own hostname.
 
-Until that secret exists the workflow still installs, typechecks and builds —
-it just skips the deploy step and says so, rather than failing. A red check
-that only ever means "Azure is not provisioned yet" teaches everyone to ignore
-red checks. On `master` it is not optional: a push there with no token fails
-loudly, because the alternative is the site quietly ceasing to update.
+Five GitHub encrypted secrets:
 
-The contact form additionally needs three application settings on the Static
-Web App itself. See [api/README.md](api/README.md).
+| Secret | What it is |
+|---|---|
+| `AZURE_CREDENTIALS` | Service principal JSON for `azure/login` |
+| `AZURE_RESOURCE_GROUP` | Resource group holding the storage account |
+| `AZURE_STORAGE_ACCOUNT` | Storage account name |
+| `CLOUDFLARE_API_TOKEN` | See the scopes below |
+| `CLOUDFLARE_ACCOUNT_ID` | Required by wrangler |
+
+`AZURE_LOCATION` is optional and defaults to `australiaeast`.
+`CLOUDFLARE_ZONE_ID` is optional; without it the cache is not purged and a
+deploy is visible once the edge TTL expires.
+
+The Cloudflare token needs four scopes. Account-level **Workers Scripts: Edit**
+is the obvious one, but `wrangler.toml` binds the Worker to routes by
+`zone_name`, so resolving that zone and creating the routes also needs zone-level
+**Zone: Read** and **Workers Routes: Edit** — with only the account scope the
+deploy gets as far as route creation and fails there. **Cache Purge: Purge**
+covers the last step. (Cache Purge has no *Edit* level, only Purge.)
+
+Until those exist the workflow still installs, typechecks, builds and runs the
+Worker's tests — it skips only the deploy and says so, rather than failing. A
+red check that only ever means "nothing is provisioned yet" teaches everyone to
+ignore red checks. On `master` it is not optional: a push there with secrets
+missing fails loudly, because the alternative is the site quietly ceasing to
+update.
+
+Pull requests build and test but never deploy. There is one environment;
+previews would need a second storage account and a Worker route per branch.
+
+Assets dropped from a build are not deleted immediately — they are kept for
+seven days. A page that is already open goes on requesting hashed chunks long
+after its HTML arrived (`fireworks` three seconds in, `birds` about ten seconds
+later), and index.html itself is edge-cached for a minute, so deleting a
+departed hash on the spot breaks visitors who are mid-visit. Everything in the
+current build is re-uploaded every deploy, so anything still in use keeps a
+fresh timestamp and never ages out.
+
+No DNS change is needed at cutover. A Worker route only fires for a hostname
+that already has a **proxied** DNS record, and kyryll.com has one — it points at
+the old storage endpoint today. Once the route exists the Worker intercepts
+before the origin is consulted, so the record's target stops mattering while
+still being what makes the route fire. Deleting it, or turning the proxy off,
+takes the site down.
+
+The contact form additionally needs three Worker secrets, set once with
+`wrangler secret put` so the workflow never handles them. See
+[worker/README.md](worker/README.md).
 
 ## Security note
 
