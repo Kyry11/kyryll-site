@@ -112,10 +112,21 @@ Web App itself. See [api/README.md](api/README.md).
 
 ## Security note
 
-The workflow this replaces committed a Cloudflare API token in plain text. The
-file is gone, but **deleting it does not invalidate the token** — it remains in
-git history from April 2021 in a repository that has been public. It must be
-revoked in the Cloudflare dashboard.
+The workflow this replaces committed a Cloudflare API token in plain text from
+April 2021, in a repository that has been public. **The token has been revoked.**
+
+The string is still reachable in history and always will be — deleting a file
+does not remove its content from earlier commits, and rewriting history to
+purge it would break every existing clone and reference for no benefit now that
+the credential is dead. It can be seen at:
+
+```bash
+git show original-2012:.github/workflows/main.yml
+```
+
+Left there deliberately, and not repeated here: a revoked token is a historical
+record, but writing it into a current file would trip every secret scanner
+pointed at this repository from now on.
 
 `phpinfo.php` and `error_log` are preserved at the tag for the record and are
 not deployed. The log contains PHP notices and an old cPanel path; it has no IP
