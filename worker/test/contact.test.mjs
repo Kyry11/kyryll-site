@@ -261,13 +261,24 @@ test('CF-Connecting-IP wins over a client-supplied X-Forwarded-For', async () =>
 })
 
 test('an unavailable rate-limit store fails open rather than refusing everyone', async () => {
+  /*
+   * This overrode `RATE_LIMIT` with a KV-shaped object — both left over from
+   * the KV implementation. Production reads `RATE_LIMITER` and expects a
+   * Durable Object namespace, so the broken store was simply ignored, the
+   * healthy default was used, and the test asserted a 200 on the happy path
+   * while claiming to prove fail-open. Renaming a binding does not fail a test
+   * that injects it under the old name; nothing catches that but reading it.
+   */
   const broken = {
-    async get() { throw new Error('KV down') },
-    async put() { throw new Error('KV down') },
+    idFromName: (name) => name,
+    get() {
+      return { fetch: async () => { throw new Error('Durable Object unreachable') } }
+    },
   }
 
-  const res = await call(request({ headers: freshIp() }), makeEnv({ RATE_LIMIT: broken }))
+  const res = await call(request({ headers: freshIp() }), makeEnv({ RATE_LIMITER: broken }))
   assert.equal(res.status, 200, 'a downed counter must not take the contact form with it')
+  assert.equal(sent.length, 1, 'and the message must still be sent')
 })
 
 test('missing email configuration is a 500, not a crash or a false success', async () => {

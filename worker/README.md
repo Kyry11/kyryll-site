@@ -143,6 +143,15 @@ Object is addressed by class name — so nothing is substituted into that file.
 serving the front end on another port can post to a locally running Worker; it
 relaxes the cross-origin check to accept any localhost page.
 
+## Compatibility date
+
+`compatibility_date` in `wrangler.toml` pins runtime behaviour. Advance it
+deliberately — bump it, run the suite, deploy, and exercise the contact form —
+rather than on a schedule. CI's `--dry-run` proves the config parses and the
+bindings resolve; it cannot tell you a behavioural flag changed underneath you,
+and that kind of change is invisible until something breaks in production.
+Roughly twice a year is enough for a site of this size.
+
 ## Running the tests
 
 From this directory:
@@ -153,7 +162,11 @@ npm test
 
 No build step and no Workers runtime needed — the handlers are plain modules
 over standard `Request`/`Response`, so `node --test` drives them directly with a
-stubbed `fetch` and a `Map`-backed storage stub. The Durable Object tests run
+stubbed `fetch` and a `Map`-backed storage stub.
+
+Nothing in the suite reads `wrangler.toml`, so CI runs `wrangler deploy
+--dry-run` alongside it. Without that, a malformed config or a broken Durable
+Object migration passes every check and fails only after merging. The Durable Object tests run
 the real `RateLimiter` class over that stub rather than reimplementing its
 logic, so a fake cannot quietly agree with a bug.
 

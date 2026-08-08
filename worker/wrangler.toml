@@ -1,6 +1,11 @@
 name = "kyryll-site"
 main = "src/index.js"
-compatibility_date = "2025-09-01"
+# Advance this deliberately, not reflexively: it changes runtime behaviour, and
+# the change is invisible until something breaks in production. The CI dry run
+# checks this file parses and the bindings resolve; it cannot tell you a
+# behavioural flag flipped underneath you. Bump it, run the suite, deploy, and
+# exercise the contact form.
+compatibility_date = "2026-08-01"
 
 # The Worker is the site's only entry point; there is no workers.dev URL to
 # leak an unproxied copy of it.

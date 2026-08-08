@@ -84,6 +84,19 @@ jobs:
         working-directory: worker
         run: npm test
 
+      # The tests exercise the handlers as plain modules; nothing in them reads
+      # wrangler.toml. So a malformed config, a binding that does not resolve or
+      # a broken Durable Object migration would have passed every check here and
+      # failed only after merging, on the master run that deploys.
+      #
+      # --dry-run bundles and resolves bindings without contacting Cloudflare,
+      # so it needs no credentials and is safe in this secret-free job. ORIGIN is
+      # supplied because the committed value is a deliberate placeholder; the
+      # host is never resolved.
+      - name: Check the Worker configuration bundles
+        working-directory: worker
+        run: npx wrangler deploy --dry-run --var ORIGIN:https://example.invalid
+
   # ---- deployment: master only, and the only job that sees a secret --------
   deploy:
     needs: validate
