@@ -183,21 +183,35 @@
  * is clipped out of the picture while remaining in the tab order, and it comes
  * back the moment it takes focus. Visually the scene is exactly as the original
  * had it; a keyboard user is one Tab away from a real, labelled control.
+ *
+ * Hidden only while the sound is ON, though — see below.
  */
 @media (min-width: 1001px) {
   /*
-   * Matched via [aria-pressed] rather than the bare id.
+   * `[aria-pressed='true']`, not the bare `[aria-pressed]` this had before.
    *
-   * This is the second time these rules have been written and the first
-   * version lost the same way: `#sound:hover` and `#sound[aria-pressed='true']`
-   * are (1,1,0), so a plain `#sound` at (1,0,0) never beat them no matter how
-   * late it appeared or that it sat inside a media query. The attribute is
-   * always present — it is in the markup and reflect() keeps it current — so
-   * `#sound[aria-pressed]` ties at (1,1,0) and wins on order, and adding
-   * :hover or :focus-visible takes it to (1,2,0), above both.
+   * Hiding it in both states made the desktop silently unrecoverable. The mute
+   * preference persists in localStorage, so one stray space bar — the only
+   * desktop control there was — silenced every future visit, with the icon that
+   * would undo it clipped to a pixel. The site simply had no sound any more and
+   * nothing on screen said why or offered a way back.
+   *
+   * The reason for hiding it never applied to that state anyway: the argument
+   * is that the track starts by itself so the icon is just something in the way.
+   * When the track is off, the icon is not in the way — it is the only way back.
+   * So it is present exactly when it is useful and gone the rest of the time,
+   * which is also what makes the space bar safe to press.
+   *
+   * On specificity, since these rules have now been rewritten twice for losing
+   * it: `#sound:hover` and `#sound[aria-pressed='true']` are both (1,1,0), so a
+   * bare `#sound` at (1,0,0) never beat them, media query or not. Matching the
+   * attribute ties at (1,1,0) and wins on order; :hover and :focus-visible take
+   * it to (1,2,0), above both. Narrowing to ='true' changes nothing about the
+   * weight — it is still one attribute selector — so the ordering that was
+   * verified here still holds.
    */
-  #sound[aria-pressed],
-  #sound[aria-pressed]:hover {
+  #sound[aria-pressed='true'],
+  #sound[aria-pressed='true']:hover {
     width: 1px;
     height: 1px;
     margin: 0;

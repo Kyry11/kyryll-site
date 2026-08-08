@@ -149,11 +149,13 @@ export function createAudio(): Audio {
   button?.addEventListener('click', toggle)
 
   /*
-   * Desktop has no speaker — the original showed it on touch devices only, and
-   * this reproduces that. But the track starts on its own there, so leaving no
-   * way at all to stop it would be worse than the clutter the icon caused.
-   * Space mutes. Undiscoverable, which is the price of an uncluttered scene,
-   * but it means nobody is stuck.
+   * On the desktop the speaker is hidden while the sound is playing — the
+   * original showed it on touch devices only, and this reproduces that. Space
+   * mutes, which is undiscoverable and was for a while the *only* desktop
+   * control: because the choice below is persisted, one stray press silenced
+   * every future visit with nothing on screen to undo it. The icon now comes
+   * back whenever the sound is off (see layout.css), so the scene stays clear
+   * while the music plays and the way back is always visible when it is not.
    *
    * Space is a busy key, so this yields in every case where it already means
    * something: it is the activation key for whatever control has focus, the
