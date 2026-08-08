@@ -23,11 +23,13 @@ that fills it is silently discarded with a 200.
 
 | Status | Meaning |
 |---|---|
-| 200 | Delivered (or honeypot silently discarded) |
+| 200 | Delivered, confirmed by Azure (or honeypot silently discarded) |
+| 202 | Accepted, but Azure had not confirmed delivery within 20s. A Static Web Apps managed API is cut off at 45s, so the wait is bounded and the visitor is told the truth rather than shown a network error for a message that is probably on its way. |
+| 415 | Content-Type was not application/json |
 | 400 | Validation failure. Body carries `{ field, message }`; the front end rumbles that field. |
 | 429 | More than 5 submissions from one IP in an hour |
 | 500 | Email is not configured — see below |
-| 502 | Azure Communication Services rejected the send |
+| 502 | The send finished in a state other than Succeeded, or Azure Communication Services rejected it outright |
 
 ## Configuration
 

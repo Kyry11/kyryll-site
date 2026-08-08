@@ -16,7 +16,7 @@
  */
 
 const { app } = require('@azure/functions')
-const { EmailClient } = require('@azure/communication-email')
+const { EmailClient, KnownEmailSendStatus } = require('@azure/communication-email')
 
 const LIMITS = {
   sendername: 100,
@@ -26,9 +26,20 @@ const LIMITS = {
 }
 
 /**
- * In-memory rate limit. A Static Web Apps managed function is a single shared
- * instance for a site this size, so a Map is enough to stop casual abuse; it
- * is not a defence against a distributed flood, which is Cloudflare's job.
+ * Best-effort rate limit, and deliberately no more than that.
+ *
+ * The counters live in process memory, which on Azure Functions means they are
+ * lost on every cold start and are not shared between instances when the host
+ * scales out — so the real ceiling is (RATE_MAX x live instances), and it
+ * resets whenever the host recycles. An earlier comment here claimed a managed
+ * function is "a single shared instance for a site this size"; that is not a
+ * guarantee Azure makes, and functions are expected to be stateless.
+ *
+ * It is kept because it costs nothing and stops the trivial case of somebody
+ * holding down Send. Anything stronger belongs where state is durable or where
+ * the traffic can be seen in aggregate: a storage-backed counter, or the CDN in
+ * front of the site. Do not read this as a defence against a determined or
+ * distributed sender.
  */
 const RATE_WINDOW_MS = 60 * 60 * 1000
 const RATE_MAX = 5
@@ -40,6 +51,17 @@ const RATE_MAX = 5
  */
 const RATE_MAX_KEYS = 10_000
 const seen = new Map()
+
+/*
+ * How long to wait for Azure to confirm delivery before answering anyway.
+ *
+ * A Static Web Apps managed API is cut off at 45 seconds. An unbounded
+ * pollUntilDone() can outlast that, and the visitor would see a network failure
+ * for a message that was in fact accepted and may well arrive. Well inside the
+ * limit, so a slow send is reported honestly rather than as an error.
+ */
+const POLL_BUDGET_MS = 20_000
+const POLL_TIMED_OUT = Symbol('poll-timed-out')
 
 app.http('contact', {
   methods: ['POST'],
@@ -122,7 +144,42 @@ app.http('contact', {
         },
       })
 
-      await poller.pollUntilDone()
+      /*
+       * Bounded wait. If Azure has not finished by the budget, stop waiting and
+       * tell the truth: accepted, outcome not yet known. 202 is still a success
+       * to the browser, so the visitor is not told to retry a message that is
+       * probably on its way.
+       */
+      let timer
+      let result
+      try {
+        result = await Promise.race([
+          poller.pollUntilDone(),
+          new Promise((resolve) => {
+            timer = setTimeout(() => resolve(POLL_TIMED_OUT), POLL_BUDGET_MS)
+          }),
+        ])
+      } finally {
+        clearTimeout(timer)
+      }
+
+      if (result === POLL_TIMED_OUT) {
+        context.warn(`Email still sending after ${POLL_BUDGET_MS}ms; returning 202`)
+        return json(202, { message: 'Message accepted — it is on its way' })
+      }
+
+      /*
+       * The poller resolves for failures too. Ignoring its status meant a
+       * rejected or dropped send was reported to the visitor as "Message has
+       * been sent", which is the worst possible answer: they believe they have
+       * reached you and stop trying.
+       */
+      if (result?.status !== KnownEmailSendStatus.Succeeded) {
+        context.error('Email did not succeed', result?.status, result?.error)
+        return json(502, {
+          message: 'The message could not be delivered. Please email me directly.',
+        })
+      }
 
       return json(200, { message: 'Message has been sent, I will get back to you sooon' })
     } catch (error) {

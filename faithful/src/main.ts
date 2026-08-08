@@ -93,6 +93,20 @@ async function revealMainContent(audio: ReturnType<typeof createAudio>): Promise
 
   if (reduced) {
     document.getElementById('clouds')?.style.setProperty('background-color', 'transparent')
+
+    /*
+     * The track is cued here too.
+     *
+     * Reduced motion skips the firework display, and the display was the only
+     * thing that ever called startTrack() — so wantsTrack stayed false, and
+     * tryStart() bailed on every path including the speaker and the space bar.
+     * Somebody who asks for less motion was silently denied the audio
+     * altogether, with a control that appeared to do nothing.
+     *
+     * A motion preference says nothing about sound, so it is cued immediately
+     * rather than waiting for a display that will not happen.
+     */
+    audio.startTrack()
     return
   }
 

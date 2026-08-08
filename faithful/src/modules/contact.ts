@@ -114,7 +114,14 @@ async function send(
       return
     }
 
-    status.textContent = 'Message has been sent, I will get back to you sooon'
+    /*
+     * The server's own words, not a hardcoded success line. It answers 202 when
+     * the send was accepted but Azure had not confirmed delivery inside the
+     * request budget, and saying "has been sent" there would be a guess
+     * presented as a fact.
+     */
+    const body = (await response.json().catch(() => null)) as { message?: string } | null
+    status.textContent = body?.message ?? 'Message has been sent, I will get back to you sooon'
 
     if (isNarrow() || prefersReducedMotion()) {
       await wait(1200)

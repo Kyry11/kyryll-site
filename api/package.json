@@ -12,6 +12,6 @@
     "@azure/functions": "^4.6.0"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }

@@ -53,7 +53,10 @@
   #container {
     width: 100%;
     height: auto;
-    padding: 0 0 96px;
+    /* Replaces the space the now-fixed nav no longer occupies in flow. The
+       nav measures ~68px at this width; 5rem leaves a little clearance if the
+       links wrap to a third line on a very narrow screen. */
+    padding: 5rem 0 96px;
   }
 
   .outer {
@@ -69,10 +72,21 @@
     display: none;
   }
 
+  /*
+   * Fixed, not sticky.
+   *
+   * Sticky is bounded by its containing block, and this nav lives inside
+   * #intro — so it stopped following the moment you scrolled into About, and by
+   * the Work section it sat about 3,000px above the viewport. The other three
+   * copies are hidden, so from there on the stacked layout had no navigation at
+   * all. Fixed takes it out of #intro's flow entirely.
+   */
   #intro .nav {
     display: flex;
-    position: sticky;
+    position: fixed;
     top: 0;
+    left: 0;
+    right: 0;
     z-index: 150;
     float: none;
     flex-wrap: wrap;
@@ -103,15 +117,39 @@
     font-size: 34px;
   }
 
-  .welcome,
-  .folio,
-  .subnav,
-  .content,
-  #contactform,
-  .visitus {
+  /* The nav is fixed, so the first section must not start underneath it. */
+  #intro {
+    padding-top: 0;
+  }
+
+  /*
+   * Scoped with #intro / #contact to match the desktop rules they override.
+   *
+   * As bare class selectors these were (0,1,0) and lost outright to
+   * `#intro .welcome` and `#intro .folio` at (1,1,0) in layout.css — being in a
+   * media query changes nothing about specificity. The result on a phone was a
+   * 550px .welcome inside a 390px viewport: the document grew to 586px wide and
+   * `overflow-x: hidden` sliced the copy off, while the surviving desktop
+   * floats collapsed #intro to the height of the nav alone.
+   */
+  #intro .welcome,
+  #intro .folio,
+  .outer .subnav,
+  .outer .content,
+  #contact #contactform,
+  #contact .visitus {
     float: none;
     width: 100%;
+    max-width: 100%;
     margin: 0 0 28px;
+  }
+
+  /* Floats are gone above, but the sections still need to contain what is
+     left, or #intro reports the nav's height and the scenes overlap. */
+  .outer::after {
+    content: '';
+    display: block;
+    clear: both;
   }
 
   #intro .welcome p {
