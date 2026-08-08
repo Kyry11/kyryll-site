@@ -5,12 +5,13 @@ dist/
 # Vite's dependency pre-bundling cache
 .vite/
 
-# Local Azure Functions settings hold the Communication Services connection
-# string. Never commit these.
-local.settings.json
+# These hold the Communication Services connection string. Never commit them.
+.dev.vars
 .env
 .env.*
 !.env.example
 
-# Azure Static Web Apps CLI
-.swa/
+# wrangler's local state, and the scratch config the deploy writes after
+# substituting the storage endpoint and KV namespace id into wrangler.toml.
+.wrangler/
+worker/wrangler.deploy.toml

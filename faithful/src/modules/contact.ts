@@ -15,7 +15,7 @@
  *
  *  - It sent a GET to https://email.kyryll.com/v1/send with the message in the
  *    query string. That host stopped resolving, so the form has been dead for
- *    years. It now POSTs JSON to /api/contact — see api/contact/.
+ *    years. It now POSTs JSON to /api/contact — see worker/.
  *
  *  - Every section change also called that endpoint, emailing a "logged event"
  *    with a visitor id, visit count, first-visit date and full IP chain. That

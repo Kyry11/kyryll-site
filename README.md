@@ -6,7 +6,7 @@ it is.
 
 ```
 faithful/   the port: same site, current stack, responsive, accessible
-api/        Azure Function backing the contact form
+worker/     the Cloudflare Worker: serves the site, and the contact API
 ```
 
 The 2012 original is tagged **`original-2012`** rather than kept as a folder —
@@ -47,7 +47,7 @@ What changed is underneath:
 | no build step, nothing minified | Vite + TypeScript, strict mode |
 | `viewport width=1000, user-scalable=no` | responsive, pinch-zoom restored |
 | Universal Analytics (dead since July 2023) | none |
-| contact form POSTing to a host that no longer resolves | `/api/contact`, an Azure Function |
+| contact form POSTing to a host that no longer resolves | `/api/contact`, handled in the Worker |
 | a tracking beacon emailed on every section change | removed |
 | sound `.play()` on load (blocked by every browser since 2017) | starts on the visitor's first interaction; speaker hidden on desktop, as the original did |
 
@@ -75,8 +75,11 @@ to mistake for faults:
   always falls below the text panels — load with `?debug` to see it drawn.
 - **The cold open always plays.** Skippable by button, click or Escape, but
   never skipped automatically.
-- **No speaker on desktop.** The original showed it on touch devices only,
-  where a gesture is required before audio can play. Space bar mutes.
+- **No speaker on desktop while the sound is playing.** The original showed it
+  on touch devices only, where a gesture is required before audio can play.
+  Space bar mutes — and the icon reappears whenever the sound is off, because
+  hiding it in *both* states made one stray space bar silence every future
+  visit with nothing on screen to undo it.
 
 ## Running it
 
@@ -96,25 +99,56 @@ npm run build --prefix faithful
 
 ## Deployment
 
-Azure Static Web Apps, behind Cloudflare for DNS and CDN.
-[.github/workflows/deploy.yml](.github/workflows/deploy.yml) builds `faithful/`
-and deploys it with the function in `api/`. Pull requests get their own preview
-URL.
+A Cloudflare Worker in front of an Azure Blob Storage static website.
+[.github/workflows/deploy.yml](.github/workflows/deploy.yml) builds `faithful/`,
+uploads it to the `$web` container, deploys the Worker, and purges the cache.
 
-One secret is required, as a GitHub encrypted secret:
+The Worker is the whole edge — it serves the build, applies the response
+headers, rewrites unmatched paths to index.html, and hosts `/api/contact`.
+Storage does none of that: it has no compute, and a storage account cannot emit
+an arbitrary response header at all. See [worker/README.md](worker/README.md).
 
-- `AZURE_STATIC_WEB_APPS_API_TOKEN` — deployment token from the Static Web App
+It replaced Azure Static Web Apps, which bundled all four jobs. The deciding
+constraint was the apex domain: Azure Storage only verifies a custom domain
+through a CNAME on a *subdomain*, so kyryll.com could never be registered on the
+account. Fetching the storage endpoint from inside the Worker sidesteps the
+question — storage only ever sees its own hostname.
 
-`GITHUB_TOKEN` is provided automatically.
+Six GitHub encrypted secrets:
 
-Until that secret exists the workflow still installs, typechecks and builds —
-it just skips the deploy step and says so, rather than failing. A red check
-that only ever means "Azure is not provisioned yet" teaches everyone to ignore
-red checks. On `master` it is not optional: a push there with no token fails
-loudly, because the alternative is the site quietly ceasing to update.
+| Secret | What it is |
+|---|---|
+| `AZURE_CREDENTIALS` | Service principal JSON for `azure/login` |
+| `AZURE_RESOURCE_GROUP` | Resource group holding the storage account |
+| `AZURE_STORAGE_ACCOUNT` | Storage account name |
+| `CLOUDFLARE_API_TOKEN` | Needs Workers Scripts: Edit, and Cache Purge: Purge |
+| `CLOUDFLARE_ACCOUNT_ID` | Required by wrangler |
+| `CLOUDFLARE_KV_NAMESPACE_ID` | The rate-limit namespace |
 
-The contact form additionally needs three application settings on the Static
-Web App itself. See [api/README.md](api/README.md).
+`AZURE_LOCATION` is optional and defaults to `australiaeast`.
+`CLOUDFLARE_ZONE_ID` is optional; without it the cache is not purged and a
+deploy is visible once the edge TTL expires.
+
+Until those exist the workflow still installs, typechecks, builds and runs the
+Worker's tests — it skips only the deploy and says so, rather than failing. A
+red check that only ever means "nothing is provisioned yet" teaches everyone to
+ignore red checks. On `master` it is not optional: a push there with secrets
+missing fails loudly, because the alternative is the site quietly ceasing to
+update.
+
+Pull requests build and test but never deploy. There is one environment;
+previews would need a second storage account and a Worker route per branch.
+
+No DNS change is needed at cutover. A Worker route only fires for a hostname
+that already has a **proxied** DNS record, and kyryll.com has one — it points at
+the old storage endpoint today. Once the route exists the Worker intercepts
+before the origin is consulted, so the record's target stops mattering while
+still being what makes the route fire. Deleting it, or turning the proxy off,
+takes the site down.
+
+The contact form additionally needs three Worker secrets, set once with
+`wrangler secret put` so the workflow never handles them. See
+[worker/README.md](worker/README.md).
 
 ## Security note
 

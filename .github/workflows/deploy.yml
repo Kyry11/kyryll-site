@@ -1,15 +1,28 @@
 name: Deploy
 
-# Replaces the original workflow, which was deleted because it hard-coded a
-# Cloudflare API token in plain text and invoked wrangler against a
-# wrangler.toml that did not exist. Every secret here comes from GitHub
-# encrypted secrets — never inline.
+# Cloudflare Worker in front of an Azure Blob Storage static site.
+#
+# This replaced an Azure Static Web Apps deployment, which bundled four jobs the
+# Worker now does itself: serving the build, applying response headers,
+# rewriting unmatched paths to index.html, and hosting the contact API. Storage
+# does none of those — it hands back a blob or a 404.
+#
+# Modelled on Kyry11/procsee's deploy-procsee-ui.yml, minus its custom-domain
+# handling. That workflow registers the domain on the storage account, which
+# needs an `asverify` CNAME on a *subdomain*; kyryll.com is an apex and Azure
+# rejects it. The Worker fetches the storage endpoint server-side, so storage
+# only ever sees its own hostname and never has to know the custom domain
+# exists. That removes the asverify record, the DNS propagation wait, the
+# grey-cloud/orange-cloud window, and the header-transform ruleset — the Worker
+# sets its own headers.
+#
+# Every secret comes from GitHub encrypted secrets. Never inline: the workflow
+# this repository started with hard-coded a Cloudflare API token in plain text.
 
 on:
   push:
     branches: [master]
   pull_request:
-    types: [opened, synchronize, reopened, closed]
     branches: [master]
   workflow_dispatch:
 
@@ -19,23 +32,29 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   build-and-deploy:
-    if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     name: Build and deploy
 
-    # Lifted to env so it can be tested in `if:` without interpolating the
+    # Lifted to env so they can be tested in `if:` without interpolating a
     # secret into a shell command.
     env:
-      SWA_TOKEN: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+      AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+      AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+      AZURE_LOCATION: ${{ secrets.AZURE_LOCATION || 'australiaeast' }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_KV_NAMESPACE_ID: ${{ secrets.CLOUDFLARE_KV_NAMESPACE_ID }}
+      SITE_DIST: faithful/dist
 
     steps:
       # Actions are pinned to commit SHAs, not floating tags. A tag can be
-      # repointed by whoever owns the action, and one of these is handed the
-      # deployment token.
+      # repointed by whoever owns the action, and these are handed cloud
+      # credentials.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Do not leave a usable credential in .git/config for later steps.
@@ -47,7 +66,14 @@ jobs:
           cache: npm
           cache-dependency-path: |
             faithful/package-lock.json
-            api/package-lock.json
+            worker/package-lock.json
+
+      # ---- build and test, on every trigger including pull requests --------
+      #
+      # Unconditional. The Worker is deployed from source and nothing else
+      # exercises it, so a syntax error or a broken handler would otherwise
+      # reach production unchallenged — and only on a run where deployment was
+      # not skipped.
 
       - name: Install — site
         working-directory: faithful
@@ -57,63 +83,207 @@ jobs:
         working-directory: faithful
         run: npm run build
 
-      # The API is deployed from source by Oryx, so nothing here used to
-      # install or exercise it — a syntax error or a broken handler would have
-      # reached production unchallenged, and only on a run where deployment was
-      # not skipped. Both steps are unconditional for that reason.
-      - name: Install — api
-        working-directory: api
+      - name: Install — worker
+        working-directory: worker
         run: npm ci
 
-      - name: Test — api
-        working-directory: api
+      - name: Test — worker
+        working-directory: worker
         run: npm test
 
-      # The build and typecheck above are the part worth running on every PR.
-      # Deployment needs a resource that may not exist yet, so it is skipped
-      # rather than failed when the token is absent — a red check that only
-      # ever means "Azure is not provisioned" trains everyone to ignore red
-      # checks.
-      - name: Note that deployment was skipped
-        if: env.SWA_TOKEN == ''
+      - name: Check deployment configuration
+        id: configuration
         run: |
-          echo "::notice::AZURE_STATIC_WEB_APPS_API_TOKEN is not set — built and typechecked, but not deployed."
+          set -euo pipefail
 
-      # On master it is not optional. Merging with no deployment configured
-      # should be loud, or the site silently stops being updated.
-      - name: Require the deployment token on master
-        if: github.ref == 'refs/heads/master' && env.SWA_TOKEN == ''
+          missing=""
+          for name in AZURE_CREDENTIALS AZURE_RESOURCE_GROUP AZURE_STORAGE_ACCOUNT \
+                      CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_KV_NAMESPACE_ID; do
+            if [ -z "${!name:-}" ]; then
+              missing="$missing $name"
+            fi
+          done
+
+          if [ -n "$missing" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Built and tested, but not deployed; missing secret(s):$missing"
+
+            # On master it is not optional. Merging with no deployment
+            # configured should be loud, or the site silently stops updating.
+            if [ "$GITHUB_REF" = "refs/heads/master" ] && [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+              echo "::error::master cannot deploy without:$missing"
+              exit 1
+            fi
+
+            exit 0
+          fi
+
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      # A pull request builds and tests but never deploys. There is one
+      # environment; preview environments would need a second storage account
+      # and a Worker route per branch.
+      - name: Skip deployment for pull requests
+        if: github.event_name == 'pull_request'
+        run: echo "::notice::Pull request — built and tested, deployment skipped."
+
+      # ---- deploy ----------------------------------------------------------
+
+      - name: Azure login
+        if: ${{ steps.configuration.outputs.ready == 'true' && github.event_name != 'pull_request' }}
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Ensure the storage account exists and serves a static site
+        if: ${{ steps.configuration.outputs.ready == 'true' && github.event_name != 'pull_request' }}
         run: |
-          echo "::error::AZURE_STATIC_WEB_APPS_API_TOKEN is missing. master cannot deploy."
-          exit 1
+          set -euo pipefail
 
-      # Deploys the built site plus the managed functions in api/.
-      # A pull request gets its own preview URL automatically.
-      - name: Deploy to Azure Static Web Apps
-        if: env.SWA_TOKEN != ''
-        uses: Azure/static-web-apps-deploy@1a947af9992250f3bc2e68ad0754c0b0c11566c9 # v1
-        with:
-          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          action: upload
-          app_location: faithful/dist
-          api_location: api
-          output_location: ''
-          skip_app_build: true
+          if ! az group show --name "$AZURE_RESOURCE_GROUP" >/dev/null 2>&1; then
+            az group create \
+              --name "$AZURE_RESOURCE_GROUP" \
+              --location "$AZURE_LOCATION" \
+              --only-show-errors
+          fi
 
-  close-preview:
-    if: github.event_name == 'pull_request' && github.event.action == 'closed'
-    runs-on: ubuntu-latest
-    name: Tear down preview
+          if ! az storage account show \
+            --name "$AZURE_STORAGE_ACCOUNT" \
+            --resource-group "$AZURE_RESOURCE_GROUP" >/dev/null 2>&1; then
+            az storage account create \
+              --name "$AZURE_STORAGE_ACCOUNT" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --kind StorageV2 \
+              --sku Standard_LRS \
+              --https-only true \
+              --min-tls-version TLS1_2 \
+              --allow-blob-public-access true \
+              --location "$AZURE_LOCATION" \
+              --only-show-errors
+          fi
 
-    env:
-      SWA_TOKEN: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+          ACCOUNT_KEY=$(az storage account keys list \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --account-name "$AZURE_STORAGE_ACCOUNT" \
+            --query "[0].value" -o tsv)
+          echo "::add-mask::$ACCOUNT_KEY"
+          echo "ACCOUNT_KEY=$ACCOUNT_KEY" >> "$GITHUB_ENV"
 
-    steps:
-      # Nothing to tear down if nothing was ever deployed.
-      - name: Close staging environment
-        if: env.SWA_TOKEN != ''
-        uses: Azure/static-web-apps-deploy@1a947af9992250f3bc2e68ad0754c0b0c11566c9 # v1
-        with:
-          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
-          action: close
+          # index.html as the error document as well: the Worker turns that 404
+          # into the 200 the old responseOverrides block produced, but only for
+          # paths that are not assets.
+          az storage blob service-properties update \
+            --account-name "$AZURE_STORAGE_ACCOUNT" \
+            --account-key "$ACCOUNT_KEY" \
+            --static-website \
+            --index-document index.html \
+            --404-document index.html \
+            --only-show-errors
+
+          STORAGE_ENDPOINT=$(az storage account show \
+            --name "$AZURE_STORAGE_ACCOUNT" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query "primaryEndpoints.web" -o tsv)
+          # Trailing slash trimmed; the Worker joins ORIGIN + path directly.
+          echo "STORAGE_ENDPOINT=${STORAGE_ENDPOINT%/}" >> "$GITHUB_ENV"
+
+      - name: Upload the build to $web
+        if: ${{ steps.configuration.outputs.ready == 'true' && github.event_name != 'pull_request' }}
+        run: |
+          set -euo pipefail
+          test -s "$SITE_DIST/index.html"
+
+          az storage blob upload-batch \
+            --account-name "$AZURE_STORAGE_ACCOUNT" \
+            --account-key "$ACCOUNT_KEY" \
+            --destination '$web' \
+            --source "$SITE_DIST" \
+            --overwrite true \
+            --only-show-errors
+
+          # Content types az infers from the extension and gets wrong or omits.
+          # Safari refuses audio served as application/octet-stream. The Worker
+          # corrects these on the way out too; fixing them at the source means
+          # anything reading the blobs directly sees the right thing as well.
+          fix_type() {
+            local pattern="$1" type="$2"
+            find "$SITE_DIST" -name "$pattern" -type f -printf '%P\n' | while IFS= read -r name; do
+              az storage blob update \
+                --account-name "$AZURE_STORAGE_ACCOUNT" \
+                --account-key "$ACCOUNT_KEY" \
+                --container-name '$web' \
+                --name "$name" \
+                --content-type "$type" \
+                --only-show-errors
+            done
+          }
+
+          fix_type '*.m4a' 'audio/mp4'
+          fix_type '*.ogg' 'audio/ogg'
+          fix_type '*.woff' 'font/woff'
+
+      - name: Prune blobs that are no longer part of the build
+        if: ${{ steps.configuration.outputs.ready == 'true' && github.event_name != 'pull_request' }}
+        run: |
+          set -euo pipefail
+
+          # Deliberately after the upload, never before: deleting first would
+          # leave the site missing files for the length of the deploy.
+          current=$(mktemp)
+          find "$SITE_DIST" -type f -printf '%P\n' | sort > "$current"
+
+          az storage blob list \
+            --account-name "$AZURE_STORAGE_ACCOUNT" \
+            --account-key "$ACCOUNT_KEY" \
+            --container-name '$web' \
+            --query "[].name" -o tsv \
+            --only-show-errors \
+            | while IFS= read -r blob; do
+                [ -n "$blob" ] || continue
+                if grep -Fxq -- "$blob" "$current"; then continue; fi
+                echo "Deleting stale blob: $blob"
+                az storage blob delete \
+                  --account-name "$AZURE_STORAGE_ACCOUNT" \
+                  --account-key "$ACCOUNT_KEY" \
+                  --container-name '$web' \
+                  --name "$blob" \
+                  --only-show-errors
+              done
+
+      - name: Deploy the Worker
+        if: ${{ steps.configuration.outputs.ready == 'true' && github.event_name != 'pull_request' }}
+        working-directory: worker
+        run: |
+          set -euo pipefail
+          : "${STORAGE_ENDPOINT:?resolved by the storage step}"
+
+          # wrangler.toml carries placeholders rather than real values: the KV
+          # namespace id does not exist until the namespace is created, and the
+          # storage endpoint changes if the account is recreated. Substituted
+          # into a scratch config so the committed one stays a template.
+          sed -e "s|__ORIGIN__|$STORAGE_ENDPOINT|" \
+              -e "s|__KV_NAMESPACE_ID__|$CLOUDFLARE_KV_NAMESPACE_ID|" \
+              wrangler.toml > wrangler.deploy.toml
+
+          npx wrangler deploy --config wrangler.deploy.toml
+
+      # The Worker's own responses are not cached by Cloudflare, but the
+      # subrequests to storage are — index.html for 60s, assets for a year. A
+      # deploy that did not purge would serve the previous build until those
+      # expire.
+      - name: Purge the Cloudflare cache
+        if: ${{ steps.configuration.outputs.ready == 'true' && github.event_name != 'pull_request' && env.CLOUDFLARE_ZONE_ID != '' }}
+        run: |
+          set -euo pipefail
+
+          response=$(curl -sS -X POST \
+            "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/purge_cache" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data '{"purge_everything":true}')
+
+          if ! echo "$response" | jq -e '.success == true' >/dev/null; then
+            echo "::warning::Cache purge failed; the previous build may be served until it ages out."
+            echo "$response" | jq -c '{success, errors}'
+            echo "::warning::Grant the token Zone > Cache Purge > Edit."
+          fi

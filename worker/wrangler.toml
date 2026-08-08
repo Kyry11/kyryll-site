@@ -1,0 +1,45 @@
+name = "kyryll-site"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+# The Worker is the site's only entry point; there is no workers.dev URL to
+# leak an unproxied copy of it.
+workers_dev = false
+
+# Both hostnames are served by the same Worker. kyryll.com is the apex, which
+# is precisely why the site is fetched from storage inside the Worker rather
+# than by pointing a proxied CNAME at it: Azure Storage will only verify a
+# custom domain on a subdomain.
+[[routes]]
+pattern = "kyryll.com/*"
+zone_name = "kyryll.com"
+
+[[routes]]
+pattern = "www.kyryll.com/*"
+zone_name = "kyryll.com"
+
+[vars]
+# The storage account's static-website endpoint, e.g.
+# https://kyryllsite.z8.web.core.windows.net — note `web`, not `blob`.
+# Overridden at deploy time with the value read back from Azure, so the commit
+# never has to be updated when the account is recreated.
+ORIGIN = "__ORIGIN__"
+
+[[kv_namespaces]]
+binding = "RATE_LIMIT"
+# Substituted by the deploy workflow from the CLOUDFLARE_KV_NAMESPACE_ID
+# secret. A namespace id is not a credential, but it does not exist until the
+# namespace is created, so it cannot be committed up front.
+#
+# `wrangler dev` without substituting this will fail to bind, which is
+# harmless: ratelimit.js treats a missing binding as "no limiter" and fails
+# open, exactly as it does when KV is unavailable in production.
+id = "__KV_NAMESPACE_ID__"
+
+# Secrets, set with `wrangler secret put` or by the deploy workflow — never here:
+#   COMMUNICATION_SERVICES_CONNECTION_STRING
+#   CONTACT_SENDER_ADDRESS
+#   CONTACT_RECIPIENT_ADDRESS
+#
+# The recipient is a secret too, deliberately. It is a real inbox and this
+# repository is public.
