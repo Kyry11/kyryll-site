@@ -28,7 +28,11 @@ on:
 
 concurrency:
   group: deploy-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded pull-request checks, never a deploy. Killing a run
+  # mid-upload-batch or mid-prune leaves storage in a state no later run
+  # reasons about — most sharply, a new index.html referencing hashed assets
+  # that were never uploaded.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -48,7 +52,6 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
-      CLOUDFLARE_KV_NAMESPACE_ID: ${{ secrets.CLOUDFLARE_KV_NAMESPACE_ID }}
       SITE_DIST: faithful/dist
 
     steps:
@@ -96,47 +99,56 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Two independent questions, deliberately kept apart: is this ref
+          # allowed to deploy, and is deployment configured.
+          #
+          # There is one environment, and it is production. Anything not on
+          # master builds and tests only.
+          #
+          # This guard is the whole reason the step exists in this shape. The
+          # step gates were previously `ready == 'true' && event != pull_request`
+          # with nothing looking at the ref, so `gh workflow run deploy.yml
+          # --ref anything` would upload that branch's build into $web, prune
+          # master's blobs, and deploy the Worker onto the live routes.
+          deployable=false
+          if [ "$GITHUB_REF" = "refs/heads/master" ] && [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            deployable=true
+          fi
+
           missing=""
           for name in AZURE_CREDENTIALS AZURE_RESOURCE_GROUP AZURE_STORAGE_ACCOUNT \
-                      CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_KV_NAMESPACE_ID; do
+                      CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
             if [ -z "${!name:-}" ]; then
               missing="$missing $name"
             fi
           done
 
-          if [ -n "$missing" ]; then
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Built and tested, but not deployed; missing secret(s):$missing"
-
-            # On master it is not optional. Merging with no deployment
-            # configured should be loud, or the site silently stops updating.
-            if [ "$GITHUB_REF" = "refs/heads/master" ] && [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
-              echo "::error::master cannot deploy without:$missing"
-              exit 1
-            fi
-
+          if [ "$deployable" != "true" ]; then
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${GITHUB_REF} is not master — built and tested, deployment skipped."
             exit 0
           fi
 
-          echo "ready=true" >> "$GITHUB_OUTPUT"
+          if [ -n "$missing" ]; then
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            # On master it is not optional. Merging with no deployment
+            # configured should be loud, or the site silently stops updating.
+            echo "::error::master cannot deploy without:$missing"
+            exit 1
+          fi
 
-      # A pull request builds and tests but never deploys. There is one
-      # environment; preview environments would need a second storage account
-      # and a Worker route per branch.
-      - name: Skip deployment for pull requests
-        if: github.event_name == 'pull_request'
-        run: echo "::notice::Pull request — built and tested, deployment skipped."
+          echo "deploy=true" >> "$GITHUB_OUTPUT"
 
       # ---- deploy ----------------------------------------------------------
 
       - name: Azure login
-        if: ${{ steps.configuration.outputs.ready == 'true' && github.event_name != 'pull_request' }}
+        if: ${{ steps.configuration.outputs.deploy == 'true' }}
         uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Ensure the storage account exists and serves a static site
-        if: ${{ steps.configuration.outputs.ready == 'true' && github.event_name != 'pull_request' }}
+        if: ${{ steps.configuration.outputs.deploy == 'true' }}
         run: |
           set -euo pipefail
 
@@ -162,19 +174,25 @@ jobs:
               --only-show-errors
           fi
 
+          # Published as AZURE_STORAGE_KEY, which the CLI reads from the
+          # environment, rather than passed as --account-key on each call.
+          # A command-line argument is visible in the process table to anything
+          # else on the runner for as long as the call runs; an environment
+          # variable is not. AZURE_STORAGE_ACCOUNT is already in the job env and
+          # the CLI picks that up the same way, so both flags disappear below.
           ACCOUNT_KEY=$(az storage account keys list \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --account-name "$AZURE_STORAGE_ACCOUNT" \
             --query "[0].value" -o tsv)
+          # Masked before it can reach a log, and the mask holds for the job.
           echo "::add-mask::$ACCOUNT_KEY"
-          echo "ACCOUNT_KEY=$ACCOUNT_KEY" >> "$GITHUB_ENV"
+          echo "AZURE_STORAGE_KEY=$ACCOUNT_KEY" >> "$GITHUB_ENV"
+          export AZURE_STORAGE_KEY="$ACCOUNT_KEY"
 
           # index.html as the error document as well: the Worker turns that 404
           # into the 200 the old responseOverrides block produced, but only for
           # paths that are not assets.
           az storage blob service-properties update \
-            --account-name "$AZURE_STORAGE_ACCOUNT" \
-            --account-key "$ACCOUNT_KEY" \
             --static-website \
             --index-document index.html \
             --404-document index.html \
@@ -188,14 +206,27 @@ jobs:
           echo "STORAGE_ENDPOINT=${STORAGE_ENDPOINT%/}" >> "$GITHUB_ENV"
 
       - name: Upload the build to $web
-        if: ${{ steps.configuration.outputs.ready == 'true' && github.event_name != 'pull_request' }}
+        if: ${{ steps.configuration.outputs.deploy == 'true' }}
         run: |
           set -euo pipefail
           test -s "$SITE_DIST/index.html"
 
+          # Everything except index.html first, then index.html on its own.
+          #
+          # upload-batch gives no ordering guarantee, so a single call can land
+          # the new index.html before the hashed /assets bundles it references —
+          # and for that window the page loads and then fails on a 404 script.
+          # Uploading the document that points at everything else last closes
+          # it. (The prune below is ordered for the mirror-image reason.)
+          #
+          # Held aside rather than excluded with --pattern: that option is
+          # fnmatch, where `[!seq]` negates a character class and there is no
+          # way to negate a whole name — `!index.html` is matched literally and
+          # would quietly exclude nothing.
+          held="$RUNNER_TEMP/index.html"
+          mv "$SITE_DIST/index.html" "$held"
+
           az storage blob upload-batch \
-            --account-name "$AZURE_STORAGE_ACCOUNT" \
-            --account-key "$ACCOUNT_KEY" \
             --destination '$web' \
             --source "$SITE_DIST" \
             --overwrite true \
@@ -204,26 +235,44 @@ jobs:
           # Content types az infers from the extension and gets wrong or omits.
           # Safari refuses audio served as application/octet-stream. The Worker
           # corrects these on the way out too; fixing them at the source means
-          # anything reading the blobs directly sees the right thing as well.
+          # anything reading the blobs directly sees the right thing as well —
+          # so this list must stay in step with MIME_FIXES in worker/src/static.js.
+          #
+          # --content-cache-control is re-passed on every call because setting
+          # one content-settings property clears the others.
           fix_type() {
             local pattern="$1" type="$2"
             find "$SITE_DIST" -name "$pattern" -type f -printf '%P\n' | while IFS= read -r name; do
               az storage blob update \
-                --account-name "$AZURE_STORAGE_ACCOUNT" \
-                --account-key "$ACCOUNT_KEY" \
                 --container-name '$web' \
                 --name "$name" \
                 --content-type "$type" \
+                --content-cache-control 'public, max-age=604800' \
                 --only-show-errors
             done
           }
 
           fix_type '*.m4a' 'audio/mp4'
+          fix_type '*.mp3' 'audio/mpeg'
           fix_type '*.ogg' 'audio/ogg'
           fix_type '*.woff' 'font/woff'
 
+          az storage blob upload \
+            --container-name '$web' \
+            --name index.html \
+            --file "$held" \
+            --overwrite \
+            --content-type 'text/html' \
+            --content-cache-control 'no-cache' \
+            --only-show-errors
+
+          # Put it back before the prune step builds its manifest from this
+          # directory — otherwise index.html is absent from the manifest and
+          # the very next step deletes the page it just uploaded.
+          mv "$held" "$SITE_DIST/index.html"
+
       - name: Prune blobs that are no longer part of the build
-        if: ${{ steps.configuration.outputs.ready == 'true' && github.event_name != 'pull_request' }}
+        if: ${{ steps.configuration.outputs.deploy == 'true' }}
         run: |
           set -euo pipefail
 
@@ -232,9 +281,23 @@ jobs:
           current=$(mktemp)
           find "$SITE_DIST" -type f -printf '%P\n' | sort > "$current"
 
+          # This step deletes every blob it does not find in $current, so an
+          # empty or truncated manifest deletes the entire site — silently, and
+          # exiting 0. The upload step's `test -s index.html` happens to prevent
+          # that today, but a destructive step should not depend on a guard in a
+          # different step that someone could reasonably reorder or remove.
+          #
+          # The sibling workflow this is modelled on hedges differently: it only
+          # prunes blobs older than 90 days, so a bad manifest costs nothing
+          # immediately. This prunes on the spot, which is cleaner but leaves no
+          # margin — hence the floor.
+          count=$(wc -l < "$current")
+          if [ "$count" -lt 10 ]; then
+            echo "::error::Refusing to prune: the build manifest lists only $count files."
+            exit 1
+          fi
+
           az storage blob list \
-            --account-name "$AZURE_STORAGE_ACCOUNT" \
-            --account-key "$ACCOUNT_KEY" \
             --container-name '$web' \
             --query "[].name" -o tsv \
             --only-show-errors \
@@ -243,47 +306,63 @@ jobs:
                 if grep -Fxq -- "$blob" "$current"; then continue; fi
                 echo "Deleting stale blob: $blob"
                 az storage blob delete \
-                  --account-name "$AZURE_STORAGE_ACCOUNT" \
-                  --account-key "$ACCOUNT_KEY" \
                   --container-name '$web' \
                   --name "$blob" \
                   --only-show-errors
               done
 
       - name: Deploy the Worker
-        if: ${{ steps.configuration.outputs.ready == 'true' && github.event_name != 'pull_request' }}
+        if: ${{ steps.configuration.outputs.deploy == 'true' }}
         working-directory: worker
         run: |
           set -euo pipefail
           : "${STORAGE_ENDPOINT:?resolved by the storage step}"
 
-          # wrangler.toml carries placeholders rather than real values: the KV
-          # namespace id does not exist until the namespace is created, and the
-          # storage endpoint changes if the account is recreated. Substituted
-          # into a scratch config so the committed one stays a template.
-          sed -e "s|__ORIGIN__|$STORAGE_ENDPOINT|" \
-              -e "s|__KV_NAMESPACE_ID__|$CLOUDFLARE_KV_NAMESPACE_ID|" \
-              wrangler.toml > wrangler.deploy.toml
-
-          npx wrangler deploy --config wrangler.deploy.toml
+          # Nothing has to be substituted into wrangler.toml any more. The
+          # rate limiter is a Durable Object, which is addressed by class name
+          # rather than by a namespace id, so the KV placeholder — and the
+          # secret that filled it, and the sed that could silently corrupt it
+          # on an `&` — are all gone.
+          #
+          # ORIGIN is passed as --var, which overrides [vars] and needs no
+          # escaping, keeping a URL out of any textual substitution.
+          npx wrangler deploy --var "ORIGIN:$STORAGE_ENDPOINT"
 
       # The Worker's own responses are not cached by Cloudflare, but the
       # subrequests to storage are — index.html for 60s, assets for a year. A
       # deploy that did not purge would serve the previous build until those
       # expire.
       - name: Purge the Cloudflare cache
-        if: ${{ steps.configuration.outputs.ready == 'true' && github.event_name != 'pull_request' && env.CLOUDFLARE_ZONE_ID != '' }}
+        if: ${{ steps.configuration.outputs.deploy == 'true' && env.CLOUDFLARE_ZONE_ID != '' }}
         run: |
           set -euo pipefail
 
-          response=$(curl -sS -X POST \
-            "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/purge_cache" \
-            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data '{"purge_everything":true}')
+          # This step warns, it does not fail: by the time it runs the site is
+          # already deployed and live, and a missed purge only means the edge
+          # serves the previous build until the TTL expires. Turning a green
+          # deploy red for that would be misleading.
+          #
+          # Which means every failure path has to be caught explicitly, because
+          # `set -e` would otherwise abort the step on precisely the conditions
+          # it is trying to report. Both bit here:
+          #   - a transport failure makes `curl` exit non-zero, killing the step
+          #     before the warning is ever reached;
+          #   - a non-JSON body (a Cloudflare challenge page, an HTML 502) makes
+          #     `jq` exit 5, and the diagnostic `jq` on the next line then hits
+          #     the same parse error and takes the step down with it.
+          if ! response=$(curl -sS -X POST \
+              "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/purge_cache" \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data '{"purge_everything":true}' 2>&1); then
+            echo "::warning::Cache purge could not be reached: $response"
+            echo "::warning::The site is deployed; the edge will serve the previous build until the TTL expires."
+            exit 0
+          fi
 
-          if ! echo "$response" | jq -e '.success == true' >/dev/null; then
+          if ! printf '%s' "$response" | jq -e '.success == true' >/dev/null 2>&1; then
             echo "::warning::Cache purge failed; the previous build may be served until it ages out."
-            echo "$response" | jq -c '{success, errors}'
-            echo "::warning::Grant the token Zone > Cache Purge > Edit."
+            # Truncated and unparsed: the body may not be JSON at all.
+            echo "::warning::Response was: $(printf '%s' "$response" | head -c 500)"
+            echo "::warning::Grant the token Zone > Cache Purge > Purge."
           fi

@@ -10,7 +10,7 @@ src/static.js     serving the build out of blob storage
 src/http.js       security headers, JSON responses
 src/contact.js    POST /api/contact
 src/acs.js        Azure Communication Services, over REST
-src/ratelimit.js  KV-backed rate limiting
+src/ratelimit.js  rate limiting, in a Durable Object
 ```
 
 ## Why a Worker and not just Cloudflare's proxy
@@ -54,33 +54,44 @@ fills it is silently discarded with a 200.
 |---|---|
 | 200 | ACS accepted and processed the message for delivery (or honeypot silently discarded). **Not** confirmation that a mailbox received it — `Succeeded` means "out for delivery", and real delivery confirmation needs Event Grid or the operational logs. |
 | 202 | Accepted, but the send had not reached a terminal state within 20s. The wait is bounded so the visitor is told the truth rather than left watching a spinner while a queue drains. |
+| 400 | Validation failure. A rejected *field* carries `{ field, message }` and the front end rumbles that field; a malformed body carries `{ message }` alone, with no `field` — read it defensively. |
+| 403 | Cross-origin submission. An `Origin` that does not match the host is refused; requests with no `Origin` at all (curl, server-side callers) are allowed through and still face validation and the rate limit. |
+| 405 | Not a POST |
 | 415 | Content-Type was not application/json |
-| 400 | Validation failure. Body carries `{ field, message }`; the front end rumbles that field. |
 | 429 | Rate limit tripped: more than 5 submissions from one IP in an hour. See below. |
 | 500 | Email is not configured — see Configuration |
 | 502 | The send reached a terminal state other than Succeeded, or ACS rejected it outright |
 
 ## Rate limiting
 
-Backed by Workers KV, which is a real improvement on what this replaced — a
-`Map` in an Azure Function's process memory, lost on every cold start and never
-shared between instances, so the true ceiling was (limit × live instances).
+A Durable Object, one per IP, holding that IP's recent submission timestamps.
 
-It is still not exact, and the honest limits are:
+It got there by way of two worse designs, and the second is worth recording
+because it looked right:
 
-- **Reads are eventually consistent.** A write in one colo can take up to about
-  a minute to be visible in another, so a sender hitting several colos at once
-  can exceed the limit for roughly that long.
-- **Read-modify-write is not atomic.** Two simultaneous requests can both read
-  the same count and both write count+1, losing one.
-- **It fails open.** If KV is unavailable or the account's daily write quota is
-  exhausted, submissions are allowed rather than refused. A contact form that
-  rejects everyone because a counter is down is a worse failure than one that
-  briefly stops counting.
+1. A `Map` in an Azure Function's process memory — lost on every cold start,
+   never shared between instances, so the real ceiling was (limit × instances).
+2. Workers KV. Durable and shared, which fixed the ceiling. But read-modify-write
+   over KV is not atomic, and that turned out to be the whole game: under 100
+   concurrent submissions from one IP, all 100 read the same empty bucket, all
+   100 were admitted, and 99 writes were lost. **Sequential traffic was limited
+   correctly and concurrent traffic was not limited at all** — exactly backwards,
+   because for a contact form the abuse case *is* the burst.
 
-The exact answer is a Cloudflare rate-limiting rule at the zone level, enforced
-at the edge before the Worker runs and subject to none of the above. This is the
-cheap layer beneath it, not a substitute for it.
+A Durable Object serialises requests per object, which is the property the
+limiter actually needs. `RateLimiter` also chains its own evaluations rather
+than relying on the runtime's input gating alone — belt-and-braces, and it makes
+the property testable against a stub that offers no ordering of its own.
+`test/ratelimit.test.mjs` issues 100 concurrent requests and asserts that
+exactly 5 are admitted.
+
+It still fails open: if the object is unreachable, submissions are allowed
+rather than refused. A contact form that rejects everyone because a counter is
+down is a worse failure than one that briefly stops counting.
+
+A Cloudflare rate-limiting rule at the zone level is still worth having in front
+of this — it is enforced at the edge before the Worker runs, so it also costs
+nothing to serve. This is the layer that survives if that is not configured.
 
 ## Email
 
@@ -122,26 +133,44 @@ npx wrangler secret put CONTACT_RECIPIENT_ADDRESS
 The recipient is a secret deliberately: it is a real inbox and this repository
 is public.
 
-`ORIGIN` and the KV namespace id are not secrets, but they are not known until
-the resources exist, so `wrangler.toml` carries placeholders that the deploy
-workflow substitutes.
+`ORIGIN` is not a secret, but it is not known until the storage account exists,
+so `wrangler.toml` carries a placeholder and both the deploy and `npm run dev`
+pass the real value as `--var`. The rate limiter needs no id at all — a Durable
+Object is addressed by class name — so nothing is substituted into that file.
+
+`ALLOW_LOCALHOST_ORIGIN` must never be set in production. It exists so that Vite
+serving the front end on another port can post to a locally running Worker; it
+relaxes the cross-origin check to accept any localhost page.
 
 ## Running the tests
 
+From this directory:
+
 ```bash
-npm test --prefix worker
+npm test
 ```
 
 No build step and no Workers runtime needed — the handlers are plain modules
 over standard `Request`/`Response`, so `node --test` drives them directly with a
-stubbed `fetch` and a `Map`-backed stand-in for KV.
+stubbed `fetch` and a `Map`-backed storage stub. The Durable Object tests run
+the real `RateLimiter` class over that stub rather than reimplementing its
+logic, so a fake cannot quietly agree with a bug.
 
 ## Local development
 
 ```bash
-npx wrangler dev
+npm run dev -- --var ORIGIN:https://<account>.z8.web.core.windows.net
 ```
 
-Without substituting the KV placeholder the binding fails to resolve, which is
-harmless: `ratelimit.js` treats a missing binding as "no limiter" and fails
-open, exactly as it does when KV is unavailable in production.
+`ORIGIN` has to be passed. Plain `wrangler dev` leaves it as the literal
+`__ORIGIN__`, which is non-empty and so passes the configuration check in
+`static.js`, then fails on `fetch("__ORIGIN__/index.html")` — every page request
+throws an invalid-URL `TypeError`. Note `web`, not `blob`, in that hostname:
+`primaryEndpoints.web` is the static-website endpoint, and the blob endpoint
+serves a different thing entirely.
+
+The rate limiter needs no such care — miniflare runs the Durable Object locally
+against its own storage, so nothing reaches Cloudflare.
+
+To exercise the contact form against a local front end, add
+`--var ALLOW_LOCALHOST_ORIGIN:true`.

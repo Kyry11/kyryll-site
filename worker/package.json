@@ -6,7 +6,7 @@
   "description": "Cloudflare Worker serving kyryll.com from Azure Blob Storage, plus the contact API",
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "dev": "wrangler dev",
+    "dev": "sed 's/__KV_NAMESPACE_ID__/00000000000000000000000000000000/' wrangler.toml > wrangler.dev.toml && wrangler dev --config wrangler.dev.toml",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {

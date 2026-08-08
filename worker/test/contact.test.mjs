@@ -16,7 +16,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import worker from '../src/index.js'
+import worker, { RateLimiter } from '../src/index.js'
 
 const CONNECTION = 'endpoint=https://example.communication.azure.com/;accesskey=a2V5LWZvci10ZXN0aW5nLW9ubHk='
 
@@ -24,6 +24,10 @@ const CONNECTION = 'endpoint=https://example.communication.azure.com/;accesskey=
 let sendStatus = 202
 let pollStatuses = ['Succeeded']
 let sent = []
+let polls = 0
+/** When set, the poll endpoint fails this way instead of answering. */
+let pollFailure = null
+let sendUrls = []
 
 const realFetch = globalThis.fetch
 
@@ -32,6 +36,7 @@ globalThis.fetch = async (url, init = {}) => {
 
   if (target.includes('/emails:send')) {
     sent.push({ headers: init.headers, body: init.body })
+    sendUrls.push(target)
     if (sendStatus !== 202) {
       return new Response('rejected', { status: sendStatus })
     }
@@ -45,6 +50,9 @@ globalThis.fetch = async (url, init = {}) => {
   }
 
   if (target.includes('/emails/operations/')) {
+    polls++
+    if (pollFailure === 'network') throw new Error('connection reset')
+    if (pollFailure) return new Response('upstream problem', { status: pollFailure })
     // Walks the script, repeating the last entry once exhausted.
     const status = pollStatuses.length > 1 ? pollStatuses.shift() : pollStatuses[0]
     return new Response(
@@ -58,17 +66,39 @@ globalThis.fetch = async (url, init = {}) => {
 
 test.after(() => { globalThis.fetch = realFetch })
 
-/** Map-backed stand-in for the KV binding. */
-function fakeKV() {
-  const store = new Map()
+/**
+ * Stand-in for the Durable Object namespace.
+ *
+ * Deliberately runs the *real* RateLimiter class over a Map-backed storage,
+ * rather than reimplementing the limiting logic in the test. A hand-rolled fake
+ * would have agreed with whatever the code did, including the KV version's
+ * lost-update bug, which is precisely what the previous fake failed to catch.
+ */
+function fakeStorage() {
+  const map = new Map()
   return {
-    async get(key, options) {
-      const raw = store.get(key)
-      if (raw === undefined) return null
-      return options?.type === 'json' ? JSON.parse(raw) : raw
+    async get(key) { return map.get(key) },
+    async put(key, value) { map.set(key, value) },
+    async deleteAll() { map.clear() },
+    async setAlarm() {},
+    _map: map,
+  }
+}
+
+function fakeNamespace() {
+  const objects = new Map()
+  return {
+    idFromName: (name) => name,
+    get(id) {
+      if (!objects.has(id)) objects.set(id, new RateLimiter({ storage: fakeStorage() }))
+      const object = objects.get(id)
+      // A real stub takes (url, init) and hands the object a Request. Returning
+      // the object itself made every call throw on `request.json()`, which
+      // rateLimited() catches as "degraded" and fails open — so the limiter
+      // looked fine and enforced nothing.
+      return { fetch: (url, init) => object.fetch(new Request(url, init)) }
     },
-    async put(key, value) { store.set(key, value) },
-    _store: store,
+    _objects: objects,
   }
 }
 
@@ -79,7 +109,7 @@ function makeEnv(overrides = {}) {
     COMMUNICATION_SERVICES_CONNECTION_STRING: CONNECTION,
     CONTACT_SENDER_ADDRESS: 'donotreply@example.test',
     CONTACT_RECIPIENT_ADDRESS: 'inbox@example.test',
-    RATE_LIMIT: fakeKV(),
+    RATE_LIMITER: fakeNamespace(),
     ORIGIN: 'https://example.z8.web.core.windows.net',
     // Keeps the slow-send case from spending twenty real seconds per run. Long
     // enough for several polls at the real intervals, so the backoff is
@@ -109,6 +139,9 @@ test.beforeEach(() => {
   sendStatus = 202
   pollStatuses = ['Succeeded']
   sent = []
+  sendUrls = []
+  polls = 0
+  pollFailure = null
 })
 
 test('rejects bodies that are not JSON objects', async () => {
@@ -183,6 +216,10 @@ test('a slow send is bounded and answered as accepted', async () => {
   assert.equal(res.status, 202, 'accepted, outcome not yet known')
   assert.ok(elapsed >= 2000, `must actually wait out the budget, waited ${elapsed}ms`)
   assert.ok(elapsed < 8000, `must not run past the budget, took ${elapsed}ms`)
+  // Without this the test passes for an implementation that sleeps out the
+  // whole budget and never asks ACS anything — which is exactly the defect
+  // this file was supposed to have caught.
+  assert.ok(polls >= 3, `must actually poll while waiting, polled ${polls} times`)
 })
 
 test('a send that turns Succeeded after a few polls is a 200', async () => {
@@ -206,7 +243,7 @@ test('rate limit is not bypassed by a spoofed X-Forwarded-For', async () => {
   }
 
   assert.ok(limited > 0, 'rotating the spoofable hop must not reset the bucket')
-  assert.equal(env.RATE_LIMIT._store.size, 1, 'all twelve must land in one bucket')
+  assert.equal(env.RATE_LIMITER._objects.size, 1, 'all twelve must land in one bucket')
 })
 
 test('CF-Connecting-IP wins over a client-supplied X-Forwarded-For', async () => {
@@ -219,7 +256,7 @@ test('CF-Connecting-IP wins over a client-supplied X-Forwarded-For', async () =>
     )
   }
 
-  assert.deepEqual([...env.RATE_LIMIT._store.keys()], ['rl:203.0.113.9'])
+  assert.deepEqual([...env.RATE_LIMITER._objects.keys()], ['203.0.113.9'])
 })
 
 test('an unavailable rate-limit store fails open rather than refusing everyone', async () => {
@@ -277,4 +314,112 @@ test('API responses carry the security headers and are never cached', async () =
   assert.match(res.headers.get('content-security-policy'), /default-src 'self'/)
   assert.equal(res.headers.get('x-content-type-options'), 'nosniff')
   assert.match(res.headers.get('strict-transport-security'), /max-age=31536000/)
+})
+
+test('the content-type gate cannot be smuggled past in a MIME parameter', async () => {
+  // CORS decides a request is "simple" — and so skips preflight — from the
+  // media type's essence, ignoring parameters. A substring check on the whole
+  // header therefore let all three simple types through the guard whose only
+  // job is to force a preflight.
+  const smuggled = [
+    'text/plain; charset=application/json',
+    'multipart/form-data; boundary=application/json',
+    'application/x-www-form-urlencoded; x=application/json',
+    'text/plain;application/json',
+  ]
+
+  for (const contentType of smuggled) {
+    const res = await call(request({ headers: { ...freshIp(), 'content-type': contentType } }))
+    assert.equal(res.status, 415, `must reject: ${contentType}`)
+  }
+
+  // Legitimate parameters on the real type still pass.
+  for (const contentType of ['application/json', 'application/json; charset=utf-8', 'APPLICATION/JSON']) {
+    const res = await call(request({ headers: { ...freshIp(), 'content-type': contentType } }))
+    assert.equal(res.status, 200, `must accept: ${contentType}`)
+  }
+})
+
+test('a localhost origin is refused in production and allowed only in development', async () => {
+  // The Vite escape hatch was unconditional, so any page served from the
+  // visitor's own machine could drive this endpoint from their address.
+  for (const origin of ['http://localhost', 'http://localhost:5173', 'http://127.0.0.1:8080']) {
+    const res = await call(request({ headers: { ...freshIp(), origin } }))
+    assert.equal(res.status, 403, `${origin} must be refused by default`)
+  }
+
+  const dev = makeEnv({ ALLOW_LOCALHOST_ORIGIN: 'true' })
+  const res = await call(request({ headers: { ...freshIp(), origin: 'http://localhost:5173' } }), dev)
+  assert.equal(res.status, 200, 'and allowed when development sets the flag')
+})
+
+test('a transient poll failure does not report a queued message as undeliverable', async () => {
+  // The send already got its 202 — ACS has the message. Answering 502 tells the
+  // visitor to email directly for something already in flight, so they resend
+  // or give up. The Azure SDK retried these internally; nothing here did.
+  for (const failure of [500, 429, 'network']) {
+    pollFailure = failure
+    const res = await call(request({ headers: freshIp() }))
+
+    assert.equal(res.status, 202, `poll ${failure} must not become a 502`)
+    assert.equal(sent.length, 1, 'and the send must have happened exactly once')
+    assert.ok(polls > 1, `must keep polling through the failure, polled ${polls}`)
+
+    sent = []
+    polls = 0
+  }
+})
+
+test('a burst from one IP is limited, not just a sequence', async () => {
+  // The KV implementation limited sequential traffic correctly and concurrent
+  // traffic not at all: every request in a burst read the same empty bucket and
+  // every one was admitted. For a contact form the abuse case *is* the burst.
+  const env = makeEnv()
+  const headers = { 'cf-connecting-ip': '203.0.113.99' }
+
+  const responses = await Promise.all(
+    Array.from({ length: 40 }, () => call(request({ headers }), env)),
+  )
+
+  const accepted = responses.filter((r) => r.status === 200).length
+  const refused = responses.filter((r) => r.status === 429).length
+
+  assert.equal(accepted, 5, `exactly the limit must get through, got ${accepted}`)
+  assert.equal(refused, 35, `the rest must be refused, got ${refused}`)
+  assert.equal(sent.length, 5, `and only ${accepted} emails may be sent, sent ${sent.length}`)
+})
+
+test('the rightmost X-Forwarded-For hop is the bucket key', async () => {
+  // Asserting only that *something* was limited passes even if clientIp returns
+  // a constant, because then every caller shares one bucket. The key itself has
+  // to be checked.
+  const env = makeEnv()
+  await call(request({ headers: { 'x-forwarded-for': '10.0.0.1, 203.0.113.7' } }), env)
+
+  assert.deepEqual([...env.RATE_LIMITER._objects.keys()], ['203.0.113.7'])
+})
+
+test('the send and poll are addressed with a pinned api-version', async () => {
+  await call(request({ headers: freshIp() }))
+
+  assert.equal(sendUrls.length, 1)
+  // The literal version, not a date-shaped pattern: a pattern accepts
+  // '2029-99-99' and every other typo. Bumping this is fine — it should just be
+  // a decision someone makes, not something that drifts.
+  assert.equal(
+    sendUrls[0],
+    'https://example.communication.azure.com/emails:send?api-version=2023-03-31',
+  )
+})
+
+test('a 405 carries Allow, as RFC 9110 requires', async () => {
+  const res = await call(request({ method: 'GET' }))
+  assert.equal(res.status, 405)
+  assert.equal(res.headers.get('allow'), 'POST')
+})
+
+test('bare /api is a missing endpoint, not the site', async () => {
+  const res = await call(new Request('https://kyryll.com/api'))
+  assert.equal(res.status, 404)
+  assert.equal(res.headers.get('content-type'), 'application/json')
 })

@@ -92,8 +92,17 @@ export async function serveStatic(request, env) {
    * 404 status, which is the part that has to be corrected here.
    */
   if (response.status === 404 && shouldFallBack(path)) {
-    response = await fromStorage(request, env, '/index.html')
-    if (response.status === 200) {
+    /*
+     * Range is dropped on the way to the fallback. Forwarding it meant
+     * `GET /about-me` with `Range: bytes=0-5` came back 206 with a six-byte
+     * slice of index.html and index.html's Content-Range — a range over a
+     * document the client never asked for. Browsers do not range-request
+     * navigations, so this was theory rather than practice, but the honest
+     * answer to "that page does not exist, here is the app shell" is the whole
+     * shell.
+     */
+    response = await fromStorage(request, env, '/index.html', { dropRange: true })
+    if (response.ok) {
       response = new Response(response.body, { status: 200, headers: response.headers })
     }
   }
@@ -107,7 +116,7 @@ function shouldFallBack(path) {
   return !isAsset(path)
 }
 
-async function fromStorage(request, env, path) {
+async function fromStorage(request, env, path, { dropRange = false } = {}) {
   const origin = String(env.ORIGIN ?? '').replace(/\/+$/, '')
   if (!origin) throw new Error('ORIGIN is not configured')
 
@@ -121,6 +130,7 @@ async function fromStorage(request, env, path) {
 
   const headers = new Headers()
   for (const name of FORWARD) {
+    if (dropRange && name === 'range') continue
     const value = request.headers.get(name)
     if (value) headers.set(name, value)
   }
@@ -130,9 +140,27 @@ async function fromStorage(request, env, path) {
   return fetch(target, {
     method: request.method,
     headers,
-    // Storage sends no useful Cache-Control of its own, so the edge is told
-    // explicitly how long to hold each class of asset.
-    cf: { cacheEverything: true, cacheTtl: edgeTtl },
+    /*
+     * Storage sends no useful Cache-Control of its own, so the edge is told
+     * explicitly how long to hold each class of asset.
+     *
+     * cacheTtlByStatus, not cacheTtl. The flat form applies the TTL whatever
+     * the status, so a 404 for a hashed asset — entirely possible for a few
+     * seconds mid-deploy, since a blob upload is not atomic — would have been
+     * held at the edge for a year. Failures get seconds; only success gets the
+     * long TTL.
+     */
+    cf: {
+      cacheEverything: true,
+      cacheTtlByStatus: {
+        '200-299': edgeTtl,
+        '304': edgeTtl,
+        '404': 5,
+        '400-403': 5,
+        '405-499': 5,
+        '500-599': 0,
+      },
+    },
   })
 }
 
@@ -146,10 +174,20 @@ function cacheFor(path) {
 function decorate(response, path) {
   const headers = new Headers(response.headers)
 
-  headers.set('cache-control', cacheFor(path).value)
+  // 2xx and 304 only. Everything else is a failure, and a failure must not
+  // inherit the asset policy — `immutable, max-age=31536000` on a 404 for a
+  // hashed bundle pins that 404 in the visitor's browser for a year, which no
+  // purge can undo and no redeploy can reach.
+  const succeeded = response.ok || response.status === 304
+  headers.set('cache-control', succeeded ? cacheFor(path).value : 'no-store')
 
-  const extension = path.slice(path.lastIndexOf('.'))
-  if (MIME_FIXES[extension]) headers.set('content-type', MIME_FIXES[extension])
+  if (succeeded) {
+    const extension = path.slice(path.lastIndexOf('.'))
+    // Applied only on success for the same reason: on a 404 this labelled
+    // storage's HTML error document as audio/mp4, and with nosniff set the
+    // browser got a body it could not decode and no explanation.
+    if (MIME_FIXES[extension]) headers.set('content-type', MIME_FIXES[extension])
+  }
 
   /*
    * Range requests are what let the browser seek in the ambient track and start
@@ -158,12 +196,19 @@ function decorate(response, path) {
    */
   headers.set('accept-ranges', 'bytes')
 
-  // Storage's own request identifiers say nothing to a visitor and name the
-  // backing account.
-  headers.delete('x-ms-request-id')
-  headers.delete('x-ms-version')
-  headers.delete('x-ms-lease-status')
-  headers.delete('x-ms-blob-type')
+  /*
+   * Swept by prefix, not by name.
+   *
+   * This was a list of five headers, which is the wrong shape for the job:
+   * storage also sends x-ms-creation-time, x-ms-server-encrypted,
+   * x-ms-blob-content-md5, x-azure-ref — and x-ms-meta-*, which carries
+   * whatever blob metadata the account happens to define and is therefore the
+   * header class most likely to name the account. A deny-list defeated the
+   * stated purpose while looking like it served it.
+   */
+  for (const name of [...headers.keys()]) {
+    if (name.startsWith('x-ms-') || name.startsWith('x-azure-')) headers.delete(name)
+  }
   headers.delete('server')
 
   harden(headers)

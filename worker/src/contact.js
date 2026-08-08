@@ -63,12 +63,23 @@ export async function handleContact(request, env, log = console) {
    * successfully and then throws on the first property access — an unhandled
    * exception on a public endpoint from a four-byte payload.
    */
-  const contentType = request.headers.get('content-type') ?? ''
-  if (!contentType.includes('application/json')) {
+  /*
+   * The essence of the media type, not a substring of the whole header.
+   *
+   * `includes('application/json')` also matched the *parameter* section, and
+   * CORS classifies a request as simple by the essence alone, ignoring
+   * parameters — so `text/plain; charset=application/json`,
+   * `multipart/form-data; boundary=application/json` and the urlencoded
+   * equivalent all sailed through a check whose entire purpose is to force a
+   * preflight. sameOrigin() below still stood behind it, but this is meant to
+   * be two layers and was one.
+   */
+  const essence = (request.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
+  if (essence !== 'application/json') {
     return json(415, { message: 'Expected application/json' })
   }
 
-  if (!sameOrigin(request)) {
+  if (!sameOrigin(request, env)) {
     return json(403, { message: 'Cross-origin submissions are not accepted' })
   }
 
@@ -100,7 +111,7 @@ export async function handleContact(request, env, log = console) {
   const problem = validate(fields)
   if (problem) return json(400, problem)
 
-  const { limited, degraded } = await rateLimited(env.RATE_LIMIT, clientIp(request))
+  const { limited, degraded } = await rateLimited(env.RATE_LIMITER, clientIp(request))
   if (limited) {
     return json(429, { message: 'Too many messages from here. Try again later.' })
   }
@@ -136,7 +147,7 @@ export async function handleContact(request, env, log = console) {
     // Overridable so the slow-send test does not have to burn the real budget
     // on every CI run; unset in production, where the constant applies.
     const budget = Number(env.POLL_BUDGET_MS) || POLL_BUDGET_MS
-    const outcome = await awaitOutcome(operation, budget)
+    const outcome = await awaitOutcome(operation, budget, log)
 
     if (outcome.status === 'TimedOut') {
       log.warn(`Email still sending after ${budget}ms; returning 202`)
@@ -179,7 +190,7 @@ export async function handleContact(request, env, log = console) {
  * the service after the handler returned and a warm worker accumulated them.
  * Here the loop simply stops; no request survives its own response.
  */
-async function awaitOutcome(operation, budgetMs) {
+async function awaitOutcome(operation, budgetMs, log) {
   const deadline = Date.now() + budgetMs
 
   if (TERMINAL.has(operation.status)) return { status: operation.status }
@@ -199,7 +210,30 @@ async function awaitOutcome(operation, budgetMs) {
      */
     await sleep(Math.min(wait, remaining))
 
-    const result = await pollOnce(operation)
+    /*
+     * A failed poll is not a failed send.
+     *
+     * This used to throw straight out to the handler's catch, which answers
+     * 502 "could not reach the server" — for a message ACS had already
+     * accepted and was going to deliver. It is a regression against the Azure
+     * SDK's pollUntilDone(), which retried transient failures internally so a
+     * single 429 or 500 never reached the visitor. And ACS throttling the poll
+     * is most likely exactly when sends are queuing, so the visitor was told to
+     * email directly at the worst moment: they resend, or they give up.
+     *
+     * Keep polling within the budget instead. If nothing terminal arrives the
+     * loop expires into the 202 path, which is the truthful answer — accepted,
+     * outcome not yet known.
+     */
+    let result
+    try {
+      result = await pollOnce(operation)
+    } catch (error) {
+      log?.warn?.('Poll failed; the send is still queued, continuing', error)
+      wait = Math.min(wait * 1.5, MAX_POLL_INTERVAL_MS)
+      continue
+    }
+
     if (TERMINAL.has(result.status)) return result
 
     wait = Math.min(wait * 1.5, MAX_POLL_INTERVAL_MS)
@@ -272,7 +306,7 @@ export function clientIp(request) {
  * through; they are not the CSRF case, and they still face validation and the
  * rate limit.
  */
-function sameOrigin(request) {
+function sameOrigin(request, env = {}) {
   const origin = request.headers.get('origin')
   if (!origin) return true
 
@@ -280,8 +314,23 @@ function sameOrigin(request) {
     const from = new URL(origin).host
     const host = request.headers.get('host') ?? new URL(request.url).host
     if (host && from === host) return true
-    // Vite serves the front end from another port during development.
-    return /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(from)
+
+    /*
+     * Vite serves the front end from another port during development, so a
+     * localhost origin has to be allowed — but only in development.
+     *
+     * This was unconditional, carried over verbatim from the Azure function
+     * where it was equally wrong. In production it meant any page served from
+     * the visitor's own machine — a dev server, an Electron app's local HTTP
+     * server, a locally installed tool with an XSS — could drive this endpoint
+     * from their address. Narrow, but there is no reason to leave it open, and
+     * the gate costs one variable that production never sets.
+     */
+    if (env.ALLOW_LOCALHOST_ORIGIN === 'true') {
+      return /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(from)
+    }
+
+    return false
   } catch {
     return false
   }

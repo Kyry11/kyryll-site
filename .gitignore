@@ -11,7 +11,8 @@ dist/
 .env.*
 !.env.example
 
-# wrangler's local state, and the scratch config the deploy writes after
-# substituting the storage endpoint and KV namespace id into wrangler.toml.
+# wrangler's local state, and the scratch configs written by `npm run dev` and
+# by the deploy after substituting the KV namespace id into wrangler.toml.
 .wrangler/
 worker/wrangler.deploy.toml
+worker/wrangler.dev.toml

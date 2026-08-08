@@ -51,10 +51,11 @@ What changed is underneath:
 | a tracking beacon emailed on every section change | removed |
 | sound `.play()` on load (blocked by every browser since 2017) | starts on the visitor's first interaction; speaker hidden on desktop, as the original did |
 
-**Payload:** 18 KB of app JavaScript (6.9 KB gzipped) plus 502 KB of three.js
-(126 KB gzipped) loaded *after* the opening sequence, so it never blocks first
-paint. The original shipped ~906 KB of unminified JavaScript, all of it
-render-blocking in `<head>`.
+**Payload:** 29 KB of app JavaScript (11 KB gzipped) across three chunks — the
+entry, plus `birds` and `fireworks` split out — and 491 KB of three.js (123 KB
+gzipped) loaded *after* the opening sequence, so none of it blocks first paint.
+The original shipped ~906 KB of unminified JavaScript, all of it render-blocking
+in `<head>`.
 
 ### Things that look like bugs and are not
 
@@ -114,20 +115,26 @@ through a CNAME on a *subdomain*, so kyryll.com could never be registered on the
 account. Fetching the storage endpoint from inside the Worker sidesteps the
 question — storage only ever sees its own hostname.
 
-Six GitHub encrypted secrets:
+Five GitHub encrypted secrets:
 
 | Secret | What it is |
 |---|---|
 | `AZURE_CREDENTIALS` | Service principal JSON for `azure/login` |
 | `AZURE_RESOURCE_GROUP` | Resource group holding the storage account |
 | `AZURE_STORAGE_ACCOUNT` | Storage account name |
-| `CLOUDFLARE_API_TOKEN` | Needs Workers Scripts: Edit, and Cache Purge: Purge |
+| `CLOUDFLARE_API_TOKEN` | See the scopes below |
 | `CLOUDFLARE_ACCOUNT_ID` | Required by wrangler |
-| `CLOUDFLARE_KV_NAMESPACE_ID` | The rate-limit namespace |
 
 `AZURE_LOCATION` is optional and defaults to `australiaeast`.
 `CLOUDFLARE_ZONE_ID` is optional; without it the cache is not purged and a
 deploy is visible once the edge TTL expires.
+
+The Cloudflare token needs four scopes. Account-level **Workers Scripts: Edit**
+is the obvious one, but `wrangler.toml` binds the Worker to routes by
+`zone_name`, so resolving that zone and creating the routes also needs zone-level
+**Zone: Read** and **Workers Routes: Edit** — with only the account scope the
+deploy gets as far as route creation and fails there. **Cache Purge: Purge**
+covers the last step. (Cache Purge has no *Edit* level, only Purge.)
 
 Until those exist the workflow still installs, typechecks, builds and runs the
 Worker's tests — it skips only the deploy and says so, rather than failing. A
