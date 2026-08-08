@@ -107,6 +107,12 @@ One secret is required, as a GitHub encrypted secret:
 
 `GITHUB_TOKEN` is provided automatically.
 
+Until that secret exists the workflow still installs, typechecks and builds —
+it just skips the deploy step and says so, rather than failing. A red check
+that only ever means "Azure is not provisioned yet" teaches everyone to ignore
+red checks. On `master` it is not optional: a push there with no token fails
+loudly, because the alternative is the site quietly ceasing to update.
+
 The contact form additionally needs three application settings on the Static
 Web App itself. See [api/README.md](api/README.md).
 
