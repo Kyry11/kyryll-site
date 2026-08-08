@@ -1,7 +1,22 @@
 # Preservation record
 
-Verification that `archive/` is a faithful copy of the live kyryll.com as it stood on
-**2026-08-06**, before any modernisation work began.
+Verification that the repository holds a faithful copy of the live kyryll.com as it
+stood on **2026-08-06**, before any modernisation work began.
+
+## Where the original lives
+
+Tagged **`original-2012`**, under `src/`.
+
+```bash
+git show original-2012:src/kyryll.html      # read a single file
+git checkout original-2012 -- src           # restore the whole site on disk
+```
+
+The site was briefly checked out to a working `archive/` directory during the port and
+then removed. That folder was never a second copy in any meaningful sense — it was a
+`git mv` of the same blobs, adding zero objects to the repository while costing 52 MB in
+every clone. Keeping it would not have made the original any safer than the tag does; git
+has held these bytes since the initial commit.
 
 ## What is live
 
@@ -19,7 +34,7 @@ workflow never functioned — there was no `wrangler.toml` in the repository.
 
 ## Method
 
-1. Enumerated all 209 files under the then-`src/`.
+1. Enumerated all 209 files under `src/`.
 2. Fetched each one from `https://kyryll.com/<path>` and compared MD5 against the local copy.
 3. Cross-checked the origin blob content independently using Azure's `content-md5`
    response header, which reports the hash of the **stored blob** and is therefore
@@ -41,23 +56,25 @@ The origin blob for `/` has `<title>Kyryll Tenin Baum Azure</title>`; the reposi
 `<title>Kyryll Tenin Baum</title>`. Proven by MD5 of the stored blob:
 
 ```
-archive/kyryll.html as committed         Ydl99cRamarJWucdYDl3aA==
+src/kyryll.html as committed             Ydl99cRamarJWucdYDl3aA==
 same file, title patched to add "Azure"  WncwdbfYW21Om5NXtStHLg==
 Azure origin content-md5 for /           WncwdbfYW21Om5NXtStHLg==
 ```
 
 The suffix is a deployment marker left over from the migration to Azure, not authored
-content. `archive/` keeps the authored form. This document records the delta so the
-live byte stream can be reconstructed exactly if ever needed.
+content. The tag keeps the authored form. This document records the delta so the live
+byte stream can be reconstructed exactly if ever needed.
 
 ## Conclusion
 
 Nothing was lost. The repository was already a complete mirror of the live site; no
 content needed to be recovered from the origin.
 
-## Known-broken things captured in the archive
+## Known-broken things in the original
 
 Recorded here so they are not mistaken for porting errors later.
+
+All paths below are relative to `original-2012:src/`.
 
 | Issue | Detail |
 |---|---|

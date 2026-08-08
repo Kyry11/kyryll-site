@@ -5,21 +5,31 @@ exactly as it ran and ports it onto a current toolchain without changing what
 it is.
 
 ```
-archive/    the 2012 site, frozen verbatim — see PRESERVATION.md
 faithful/   the port: same site, current stack, responsive, accessible
 api/        Azure Function backing the contact form
 ```
 
+The 2012 original is tagged **`original-2012`** rather than kept as a folder —
+it is the same blobs git has held since the initial commit, so a working copy
+adds nothing to its safety and 52 MB to every clone.
+
+```bash
+git show original-2012:src/kyryll.html      # read a single file
+git checkout original-2012 -- src           # restore the whole site on disk
+```
+
 ## Preservation
 
-`archive/` is a byte-accurate copy of what kyryll.com served. All 209 files
-were fetched and compared; the method and result are in
+The tag is a byte-accurate copy of what kyryll.com served. All 209 files were
+fetched and compared against the live origin — including Azure's own
+`content-md5` for `/`, which reports the hash of the stored blob and so is
+immune to anything Cloudflare does at the edge. The method and result are in
 [PRESERVATION.md](PRESERVATION.md), along with the list of things that were
 already broken in production so they are not mistaken for porting errors.
 
-Nothing in `archive/` is deployed. It runs as static files if you want to see
-the original — but note four images 404 on a case-sensitive filesystem, and
-both PHP endpoints and the contact form are dead.
+Restored to disk it runs as static files — but note four images 404 on a
+case-sensitive filesystem, and both PHP endpoints and the contact form are
+dead.
 
 ## The port
 
@@ -107,9 +117,9 @@ file is gone, but **deleting it does not invalidate the token** — it remains i
 git history from April 2021 in a repository that has been public. It must be
 revoked in the Cloudflare dashboard.
 
-`archive/phpinfo.php` and `archive/error_log` are preserved for the record but
-are not deployed. The log contains PHP notices and an old cPanel path; it has
-no IP addresses, credentials, or email addresses.
+`phpinfo.php` and `error_log` are preserved at the tag for the record and are
+not deployed. The log contains PHP notices and an old cPanel path; it has no IP
+addresses, credentials, or email addresses.
 
 ## Content
 
