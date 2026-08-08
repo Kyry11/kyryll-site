@@ -17,6 +17,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import worker, { RateLimiter } from '../src/index.js'
+import { handleContact } from '../src/contact.js'
 
 const CONNECTION = 'endpoint=https://example.communication.azure.com/;accesskey=a2V5LWZvci10ZXN0aW5nLW9ubHk='
 
@@ -422,4 +423,87 @@ test('bare /api is a missing endpoint, not the site', async () => {
   const res = await call(new Request('https://kyryll.com/api'))
   assert.equal(res.status, 404)
   assert.equal(res.headers.get('content-type'), 'application/json')
+})
+
+test('an oversized body is refused before it is buffered', async () => {
+  // request.json() buffers whatever arrives, and Cloudflare accepts bodies up
+  // to 100MB against a 128MB isolate limit. Parsing first put a public endpoint
+  // one request away from an out-of-memory isolate, with the field-length
+  // checks — and the rate limiter — both far too late to help.
+  const huge = JSON.stringify({ ...VALID, comments: 'x'.repeat(64 * 1024) })
+
+  const res = await call(request({ raw: huge, headers: freshIp() }))
+  assert.equal(res.status, 413)
+  assert.equal(sent.length, 0)
+})
+
+test('the byte cap holds when Content-Length lies or is absent', async () => {
+  // Content-Length is caller-supplied and missing entirely on a chunked body,
+  // so it cannot be the enforcement point.
+  const payload = new TextEncoder().encode(
+    JSON.stringify({ ...VALID, comments: 'x'.repeat(64 * 1024) }),
+  )
+
+  const streamed = new Request('https://kyryll.com/api/contact', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...freshIp() },
+    body: new ReadableStream({
+      start(controller) {
+        // Chunked, so the runtime sends no Content-Length at all.
+        for (let at = 0; at < payload.length; at += 8192) {
+          controller.enqueue(payload.slice(at, at + 8192))
+        }
+        controller.close()
+      },
+    }),
+    duplex: 'half',
+  })
+
+  assert.equal(streamed.headers.get('content-length'), null, 'precondition: no Content-Length')
+
+  const res = await call(streamed)
+  assert.equal(res.status, 413)
+  assert.equal(sent.length, 0)
+})
+
+test('a legitimate maximum-length message still gets through', async () => {
+  // The cap must sit above anything validate() would accept, or the two guards
+  // disagree and the longer messages the form allows are silently unsendable.
+  const atLimit = { ...VALID, comments: 'x'.repeat(5000) }
+
+  const res = await call(request({ body: atLimit, headers: freshIp() }))
+  assert.equal(res.status, 200)
+  assert.equal(sent.length, 1)
+})
+
+test('a declared Content-Length over the cap is refused without reading the body', async () => {
+  /*
+   * The streaming cap alone would catch this, so removing the header check
+   * breaks no other test — which is exactly why this one exists. The point of
+   * the header check is that it costs nothing: it rejects before a single byte
+   * is pulled off the socket. This asserts that property directly by handing
+   * the handler a body that throws if it is touched.
+   *
+   * Content-Length is a forbidden header on a constructed Request, so the
+   * handler is called with a stub rather than through worker.fetch.
+   */
+  let bodyTouched = false
+  const headers = new Map([
+    ['content-type', 'application/json'],
+    ['content-length', String(100 * 1024 * 1024)],
+    ['cf-connecting-ip', '203.0.113.55'],
+  ])
+
+  const stub = {
+    url: 'https://kyryll.com/api/contact',
+    method: 'POST',
+    headers: { get: (name) => headers.get(name.toLowerCase()) ?? null },
+    get body() { bodyTouched = true; throw new Error('body must not be read') },
+  }
+
+  const res = await handleContact(stub, makeEnv(), quiet)
+
+  assert.equal(res.status, 413)
+  assert.equal(bodyTouched, false, 'the body must not be touched once the length is known')
+  assert.equal(sent.length, 0)
 })

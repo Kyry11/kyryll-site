@@ -54,6 +54,58 @@ const POLL_BUDGET_MS = 20_000
 const FIRST_POLL_MS = 400
 const MAX_POLL_INTERVAL_MS = 4000
 
+/*
+ * The largest body worth reading. The comments field is capped at 5000
+ * characters and the other three at 100/254/40, so even with every character
+ * three bytes of UTF-8 a legitimate submission is well under this.
+ */
+const MAX_BODY_BYTES = 32 * 1024
+
+class BodyTooLarge extends Error {}
+
+/**
+ * Reads the body as text, aborting once it exceeds `limit` bytes.
+ *
+ * Counts as it streams rather than trusting Content-Length, which is absent on
+ * a chunked body and is in any case supplied by the caller. Bodies are UTF-8,
+ * so byte length is what matters; the decode happens once at the end.
+ */
+async function readBounded(request, limit) {
+  if (!request.body) return ''
+
+  const reader = request.body.getReader()
+  const chunks = []
+  let total = 0
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      total += value.byteLength
+      if (total > limit) {
+        // Stop pulling. Without this the sender keeps streaming into a socket
+        // we have already decided to reject.
+        await reader.cancel()
+        throw new BodyTooLarge()
+      }
+
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  const joined = new Uint8Array(total)
+  let at = 0
+  for (const chunk of chunks) {
+    joined.set(chunk, at)
+    at += chunk.byteLength
+  }
+
+  return new TextDecoder().decode(joined)
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 export async function handleContact(request, env, log = console) {
@@ -83,9 +135,39 @@ export async function handleContact(request, env, log = console) {
     return json(403, { message: 'Cross-origin submissions are not accepted' })
   }
 
+  /*
+   * Bound the body before reading it.
+   *
+   * request.json() buffers whatever arrives, and Cloudflare accepts request
+   * bodies up to 100 MB against a 128 MB isolate limit — so a public endpoint
+   * that parses first is one request away from an out-of-memory isolate, and
+   * the field-length checks in validate() are far too late to help. The rate
+   * limiter is later still, and would not have been reached.
+   *
+   * MAX_BODY_BYTES is generous against the real payload: the largest legitimate
+   * submission is roughly the 5000-character comments limit plus the other three
+   * fields, comfortably under 16 KB even with every character multi-byte.
+   */
+  const declared = Number(request.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    return json(413, { message: 'That message is too large' })
+  }
+
+  let raw
+  try {
+    // Content-Length is absent on a chunked body and is attacker-supplied in
+    // any case, so the real enforcement is counting the bytes as they arrive.
+    raw = await readBounded(request, MAX_BODY_BYTES)
+  } catch (error) {
+    if (error instanceof BodyTooLarge) {
+      return json(413, { message: 'That message is too large' })
+    }
+    return json(400, { message: 'Expected a JSON body' })
+  }
+
   let body
   try {
-    body = await request.json()
+    body = JSON.parse(raw)
   } catch {
     return json(400, { message: 'Expected a JSON body' })
   }

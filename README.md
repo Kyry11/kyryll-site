@@ -104,6 +104,16 @@ A Cloudflare Worker in front of an Azure Blob Storage static website.
 [.github/workflows/deploy.yml](.github/workflows/deploy.yml) builds `faithful/`,
 uploads it to the `$web` container, deploys the Worker, and purges the cache.
 
+It is two jobs, and the split is a security boundary rather than tidiness.
+`validate` builds and tests on every trigger and holds **no secrets at all**;
+`deploy` carries the credentials and only comes into existence for a push to
+`master`. A single job with the secrets at job scope exposed them to everything
+it ran — including pull-request code and every package in the install tree —
+and a deploy-time `if:` does nothing about that, because the secrets are already
+on the runner by then. `deploy` names a `production` environment, so the secrets
+can be moved from repository scope to that environment and put behind a required
+reviewer if you ever want it.
+
 The Worker is the whole edge — it serves the build, applies the response
 headers, rewrites unmatched paths to index.html, and hosts `/api/contact`.
 Storage does none of that: it has no compute, and a storage account cannot emit
@@ -145,6 +155,14 @@ update.
 
 Pull requests build and test but never deploy. There is one environment;
 previews would need a second storage account and a Worker route per branch.
+
+Assets dropped from a build are not deleted immediately — they are kept for
+seven days. A page that is already open goes on requesting hashed chunks long
+after its HTML arrived (`fireworks` three seconds in, `birds` about ten seconds
+later), and index.html itself is edge-cached for a minute, so deleting a
+departed hash on the spot breaks visitors who are mid-visit. Everything in the
+current build is re-uploaded every deploy, so anything still in use keeps a
+fresh timestamp and never ages out.
 
 No DNS change is needed at cutover. A Worker route only fires for a hostname
 that already has a **proxied** DNS record, and kyryll.com has one — it points at

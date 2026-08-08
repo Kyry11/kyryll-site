@@ -57,6 +57,7 @@ fills it is silently discarded with a 200.
 | 400 | Validation failure. A rejected *field* carries `{ field, message }` and the front end rumbles that field; a malformed body carries `{ message }` alone, with no `field` — read it defensively. |
 | 403 | Cross-origin submission. An `Origin` that does not match the host is refused; requests with no `Origin` at all (curl, server-side callers) are allowed through and still face validation and the rate limit. |
 | 405 | Not a POST |
+| 413 | Body over 32 KB. Checked from Content-Length where present and enforced by counting bytes as they stream, since that header is absent on a chunked body and caller-supplied in any case. The cap sits well above the largest submission the field limits allow. |
 | 415 | Content-Type was not application/json |
 | 429 | Rate limit tripped: more than 5 submissions from one IP in an hour. See below. |
 | 500 | Email is not configured — see Configuration |

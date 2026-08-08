@@ -26,24 +26,87 @@ on:
     branches: [master]
   workflow_dispatch:
 
-concurrency:
-  group: deploy-${{ github.ref }}
-  # Cancel superseded pull-request checks, never a deploy. Killing a run
-  # mid-upload-batch or mid-prune leaves storage in a state no later run
-  # reasons about — most sharply, a new index.html referencing hashed assets
-  # that were never uploaded.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
-  build-and-deploy:
+  # ---- validation: runs on every trigger, and holds no secrets -------------
+  #
+  # Deliberately a separate job from the deploy below, with no `env:` block.
+  #
+  # A single job carrying the Azure and Cloudflare credentials at job scope
+  # exposed them to everything that job ran — and this job runs `npm ci`, a
+  # build, and tests, against pull-request code. The deploy guard only stopped
+  # deployment; it did nothing to stop PR code, or any dependency in the
+  # install tree, from reading the environment and exfiltrating it. Secrets
+  # must not be present on the runner at all while untrusted code executes,
+  # which is a property of job boundaries, not of `if:` conditions.
+  validate:
     runs-on: ubuntu-latest
-    name: Build and deploy
+    name: Build and test
 
-    # Lifted to env so they can be tested in `if:` without interpolating a
-    # secret into a shell command.
+    concurrency:
+      group: validate-${{ github.ref }}
+      cancel-in-progress: true
+
+    steps:
+      # Actions are pinned to commit SHAs, not floating tags. A tag can be
+      # repointed by whoever owns the action.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            faithful/package-lock.json
+            worker/package-lock.json
+
+      - name: Install — site
+        working-directory: faithful
+        run: npm ci
+
+      - name: Typecheck and build — site
+        working-directory: faithful
+        run: npm run build
+
+      # The Worker is deployed from source and nothing else exercises it, so a
+      # syntax error or a broken handler would otherwise reach production
+      # unchallenged.
+      - name: Install — worker
+        working-directory: worker
+        run: npm ci
+
+      - name: Test — worker
+        working-directory: worker
+        run: npm test
+
+  # ---- deployment: master only, and the only job that sees a secret --------
+  deploy:
+    needs: validate
+    # The ref check lives here rather than in a script step so the job — and
+    # therefore the secrets — does not come into existence at all for a pull
+    # request or a dispatch on another branch. Previously every gate tested the
+    # event and the secrets and none tested the ref, so `gh workflow run
+    # --ref anything` would have shipped that branch and pruned master's blobs.
+    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    name: Deploy
+
+    # Named so the secrets can later be moved from repository scope to this
+    # environment, and optionally put behind a required reviewer. Works with
+    # repository secrets as-is.
+    environment: production
+
+    concurrency:
+      # Never cancelled: killing a run mid-upload or mid-prune leaves storage in
+      # a state no later run reasons about.
+      group: deploy-production
+      cancel-in-progress: false
+
     env:
       AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
       AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
@@ -55,12 +118,8 @@ jobs:
       SITE_DIST: faithful/dist
 
     steps:
-      # Actions are pinned to commit SHAs, not floating tags. A tag can be
-      # repointed by whoever owns the action, and these are handed cloud
-      # credentials.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          # Do not leave a usable credential in .git/config for later steps.
           persist-credentials: false
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -71,49 +130,23 @@ jobs:
             faithful/package-lock.json
             worker/package-lock.json
 
-      # ---- build and test, on every trigger including pull requests --------
-      #
-      # Unconditional. The Worker is deployed from source and nothing else
-      # exercises it, so a syntax error or a broken handler would otherwise
-      # reach production unchallenged — and only on a run where deployment was
-      # not skipped.
-
-      - name: Install — site
+      # Rebuilt here rather than carried over as an artifact from `validate`.
+      # An artifact would be a file written by an earlier job and consumed by
+      # the one holding the credentials, which reintroduces a smaller version of
+      # the problem this split exists to solve. The build takes about a second.
+      - name: Install and build — site
         working-directory: faithful
-        run: npm ci
-
-      - name: Typecheck and build — site
-        working-directory: faithful
-        run: npm run build
+        run: |
+          npm ci
+          npm run build
 
       - name: Install — worker
         working-directory: worker
         run: npm ci
 
-      - name: Test — worker
-        working-directory: worker
-        run: npm test
-
       - name: Check deployment configuration
-        id: configuration
         run: |
           set -euo pipefail
-
-          # Two independent questions, deliberately kept apart: is this ref
-          # allowed to deploy, and is deployment configured.
-          #
-          # There is one environment, and it is production. Anything not on
-          # master builds and tests only.
-          #
-          # This guard is the whole reason the step exists in this shape. The
-          # step gates were previously `ready == 'true' && event != pull_request`
-          # with nothing looking at the ref, so `gh workflow run deploy.yml
-          # --ref anything` would upload that branch's build into $web, prune
-          # master's blobs, and deploy the Worker onto the live routes.
-          deployable=false
-          if [ "$GITHUB_REF" = "refs/heads/master" ] && [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
-            deployable=true
-          fi
 
           missing=""
           for name in AZURE_CREDENTIALS AZURE_RESOURCE_GROUP AZURE_STORAGE_ACCOUNT \
@@ -123,32 +156,20 @@ jobs:
             fi
           done
 
-          if [ "$deployable" != "true" ]; then
-            echo "deploy=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::${GITHUB_REF} is not master — built and tested, deployment skipped."
-            exit 0
-          fi
-
+          # On master it is not optional. This job only runs on master, so a
+          # missing secret here is always worth failing loudly for — the
+          # alternative is the site quietly ceasing to update.
           if [ -n "$missing" ]; then
-            echo "deploy=false" >> "$GITHUB_OUTPUT"
-            # On master it is not optional. Merging with no deployment
-            # configured should be loud, or the site silently stops updating.
             echo "::error::master cannot deploy without:$missing"
             exit 1
           fi
 
-          echo "deploy=true" >> "$GITHUB_OUTPUT"
-
-      # ---- deploy ----------------------------------------------------------
-
       - name: Azure login
-        if: ${{ steps.configuration.outputs.deploy == 'true' }}
         uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Ensure the storage account exists and serves a static site
-        if: ${{ steps.configuration.outputs.deploy == 'true' }}
         run: |
           set -euo pipefail
 
@@ -206,7 +227,6 @@ jobs:
           echo "STORAGE_ENDPOINT=${STORAGE_ENDPOINT%/}" >> "$GITHUB_ENV"
 
       - name: Upload the build to $web
-        if: ${{ steps.configuration.outputs.deploy == 'true' }}
         run: |
           set -euo pipefail
           test -s "$SITE_DIST/index.html"
@@ -272,7 +292,6 @@ jobs:
           mv "$held" "$SITE_DIST/index.html"
 
       - name: Prune blobs that are no longer part of the build
-        if: ${{ steps.configuration.outputs.deploy == 'true' }}
         run: |
           set -euo pipefail
 
@@ -281,30 +300,53 @@ jobs:
           current=$(mktemp)
           find "$SITE_DIST" -type f -printf '%P\n' | sort > "$current"
 
-          # This step deletes every blob it does not find in $current, so an
-          # empty or truncated manifest deletes the entire site — silently, and
-          # exiting 0. The upload step's `test -s index.html` happens to prevent
-          # that today, but a destructive step should not depend on a guard in a
-          # different step that someone could reasonably reorder or remove.
-          #
-          # The sibling workflow this is modelled on hedges differently: it only
-          # prunes blobs older than 90 days, so a bad manifest costs nothing
-          # immediately. This prunes on the spot, which is cleaner but leaves no
-          # margin — hence the floor.
+          # This step deletes blobs it does not find in $current, so an empty or
+          # truncated manifest would take the entire site with it — silently,
+          # and exiting 0. The upload step's `test -s index.html` happens to
+          # prevent that today, but a destructive step should not depend on a
+          # guard in a different step that someone could reasonably reorder.
           count=$(wc -l < "$current")
           if [ "$count" -lt 10 ]; then
             echo "::error::Refusing to prune: the build manifest lists only $count files."
             exit 1
           fi
 
+          # Absent from the build is not sufficient. It must also be old.
+          #
+          # Deleting a departed hash immediately breaks pages that are already
+          # open. index.html is edge-cached for 60s, so a visitor can still be
+          # served the previous build after the deploy — and even a visitor who
+          # loaded the *new* one has not finished: main.ts imports the fireworks
+          # chunk three seconds in and the birds chunk about ten seconds later,
+          # so the hashes a live page still needs are requested long after its
+          # HTML arrived. The cache purge that follows makes it worse by
+          # guaranteeing the next request reaches storage.
+          #
+          # Every file in the current build is re-uploaded on every deploy, so
+          # anything still in use keeps a fresh lastModified and never ages
+          # past the grace period. Only a hash that has been out of the build
+          # for a week is removed.
+          GRACE_DAYS=7
+          cutoff=$(date -u -d "$GRACE_DAYS days ago" +%s)
+
           az storage blob list \
             --container-name '$web' \
-            --query "[].name" -o tsv \
             --only-show-errors \
+            -o json \
+            | jq -r --argjson cutoff "$cutoff" '
+                .[]
+                | select(
+                    (.properties.lastModified
+                      | sub("\\.[0-9]+"; "")
+                      | sub("\\+00:00$"; "Z")
+                      | fromdateiso8601) < $cutoff
+                  )
+                | .name
+              ' \
             | while IFS= read -r blob; do
                 [ -n "$blob" ] || continue
                 if grep -Fxq -- "$blob" "$current"; then continue; fi
-                echo "Deleting stale blob: $blob"
+                echo "Deleting blob absent from the build for over $GRACE_DAYS days: $blob"
                 az storage blob delete \
                   --container-name '$web' \
                   --name "$blob" \
@@ -312,7 +354,6 @@ jobs:
               done
 
       - name: Deploy the Worker
-        if: ${{ steps.configuration.outputs.deploy == 'true' }}
         working-directory: worker
         run: |
           set -euo pipefail
@@ -333,7 +374,7 @@ jobs:
       # deploy that did not purge would serve the previous build until those
       # expire.
       - name: Purge the Cloudflare cache
-        if: ${{ steps.configuration.outputs.deploy == 'true' && env.CLOUDFLARE_ZONE_ID != '' }}
+        if: ${{ env.CLOUDFLARE_ZONE_ID != '' }}
         run: |
           set -euo pipefail
 
