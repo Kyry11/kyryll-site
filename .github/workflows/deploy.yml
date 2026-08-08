@@ -1,0 +1,70 @@
+name: Deploy
+
+# Replaces the original workflow, which was deleted because it hard-coded a
+# Cloudflare API token in plain text and invoked wrangler against a
+# wrangler.toml that did not exist. Every secret here comes from GitHub
+# encrypted secrets — never inline.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  build-and-deploy:
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    name: Build and deploy
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: faithful/package-lock.json
+
+      - name: Install
+        working-directory: faithful
+        run: npm ci
+
+      - name: Typecheck and build
+        working-directory: faithful
+        run: npm run build
+
+      # Deploys the built site plus the managed functions in api/.
+      # A pull request gets its own preview URL automatically.
+      - name: Deploy to Azure Static Web Apps
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          action: upload
+          app_location: faithful/dist
+          api_location: api
+          output_location: ''
+          skip_app_build: true
+
+  close-preview:
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    name: Tear down preview
+
+    steps:
+      - name: Close staging environment
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+          action: close

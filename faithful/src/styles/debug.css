@@ -1,0 +1,64 @@
+/*
+ * TEMPORARY — canvas boundary overlay.
+ *
+ * Off unless the page is loaded with ?debug, so it never affects normal
+ * viewing. To remove entirely: delete this file, its import in main.ts, and
+ * the setupCanvasDebug() call and function.
+ *
+ * Shows where the flock's two canvases meet, and that the footer canvas sits
+ * exactly over the skyline plate rather than beside it.
+ */
+
+:root[data-debug-canvas] #birdsMain {
+  outline: 1px dashed #4fd6ff;
+  outline-offset: -1px;
+}
+
+:root[data-debug-canvas] #birdsFooter {
+  outline: 1px dashed #ff5cf0;
+  outline-offset: -1px;
+}
+
+:root[data-debug-canvas] #treeline {
+  outline: 1px dotted #ffd24f;
+  outline-offset: -3px;
+}
+
+/* The seam itself: a solid line exactly where the two canvases abut. */
+#debug-seam {
+  position: fixed;
+  left: 0;
+  width: 100%;
+  height: 0;
+  border-top: 1px solid #ff2d2d;
+  z-index: 9998;
+  pointer-events: none;
+}
+
+#debug-legend {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 9999;
+  padding: 10px 12px;
+  font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 6px;
+  pointer-events: none;
+  white-space: pre;
+}
+
+#debug-legend b {
+  font-weight: 400;
+}
+
+#debug-legend .swatch {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 6px;
+  vertical-align: baseline;
+  border: 1px solid currentColor;
+}

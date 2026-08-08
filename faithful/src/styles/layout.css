@@ -1,0 +1,518 @@
+/*
+ * The stage: four stacked night scenes, a fixed tree in the left foreground,
+ * a parallaxing cloud layer, and a 977px column of content floating over it.
+ *
+ * Ported from the 2012 css/kyryll.css with the magic numbers kept intact —
+ * the section offsets (0 / 1000 / 1960 / 2815) are what make each scene line
+ * up with its background plate, so they are deliberately not "cleaned up".
+ */
+
+#content {
+  position: relative;
+}
+
+#content[hidden] {
+  display: none;
+}
+
+/* ---- scenery ------------------------------------------------------------ */
+
+/*
+ * The four plates are one continuous 4000px sky, not four independent
+ * backdrops: night harbour, then sunset with the sun low in bg2, then dusk
+ * with the moon *rising out of the bottom of bg3 and continuing into the top
+ * of bg4* — along with a Sputnik. They only line up at natural 1:1 scale,
+ * stacked exactly --scene-height apart.
+ *
+ * `background-size: cover` breaks that. It scales each 1680x1000 plate to the
+ * viewport width, so the crop differs per plate: the moon is severed at the
+ * bg3/bg4 join and the gradients no longer meet, which is what produces the
+ * hard blue-to-pink edge partway down. Natural size, as the original had it.
+ *
+ * repeat-x, also as the original: past 1680px wide the tile edges show, but
+ * the sun and moon are centred and nowhere near those columns, so all that
+ * repeats is smooth gradient. Vertical repeat can never show — each plate is
+ * exactly one image tall.
+ */
+#bg1, #bg2, #bg3, #bg4 {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: var(--scene-height);
+  z-index: 0;
+  background-position: 50% 0;
+  background-repeat: repeat-x;
+  background-size: auto;
+}
+
+#bg1 { top: 0;    background-image: url('/img/bg1.jpg'); }
+#bg2 { top: 1000px; background-image: url('/img/bg2.jpg'); }
+#bg3 { top: 2000px; background-image: url('/img/bg3.jpg'); }
+#bg4 { top: 3000px; background-image: url('/img/bg4.jpg'); }
+
+#fg {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 310px;
+  height: 310px;
+  background: url('/img/tree.png') no-repeat left top;
+  background-size: 310px 310px;
+  z-index: 50;
+  pointer-events: none;
+}
+
+/*
+ * The cloud layer is also the curtain.
+ *
+ * The original markup carried `style="background-color: black;"` on this
+ * element, so it started fully opaque and hid the four sky plates beneath it.
+ * The reveal order that produces is the whole theatrical effect: the splash
+ * cross-fades out to black, the content column fades up over seven seconds
+ * against that black, and only then do the clouds lift to transparent and the
+ * night sky appear behind the text already standing there.
+ *
+ * Declared here rather than inline, but it must be the initial value — setting
+ * it at lift time instead means the sky is visible the whole way through and
+ * then flashes to black ten seconds in, which is precisely backwards.
+ */
+#clouds {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: var(--stage-height);
+  background-color: #000;
+  background-image: url('/img/bg-clouds.png');
+  background-repeat: repeat;
+  /* The original used background-attachment: fixed and moved
+     background-position on every scroll event. That forces a full-layer
+     repaint per frame; translating a scrolling layer on the compositor does
+     the same thing for free. See scenes.ts. */
+  background-attachment: scroll;
+  will-change: background-position;
+  z-index: 15;
+  pointer-events: none;
+}
+
+/*
+ * The flock renders into two canvases, and the split is about stacking rather
+ * than geometry — see the note at the top of birds.ts.
+ *
+ *   #birdsMain    z 10    under the content column (70): birds pass behind the
+ *                         text
+ *   #treeline     z 100   over the content column, as the original's footer
+ *                         canvas was
+ *   #birdsFooter  z 101   over the treeline: birds pass in front of the city
+ *
+ * A single canvas cannot be both under the text and over the skyline, which is
+ * why the original had two and why this does again.
+ */
+#birdsMain {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 10;
+  pointer-events: none;
+}
+
+#birdsFooter {
+  position: fixed;
+  left: 0;
+  /* `top` is written by birds.ts, where the main canvas ends. */
+  z-index: 101;
+  pointer-events: none;
+  background: transparent;
+}
+
+#treeline {
+  position: fixed;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  /* The original derived this from FOOTER_HEIGHT_WIDTH_RATIO = 3. */
+  aspect-ratio: 3 / 1;
+  z-index: 100;
+  pointer-events: none;
+  background: url('/img/bgfooter.png') no-repeat bottom center / contain;
+}
+
+/* ---- ambient sound toggle ---------------------------------------------- */
+
+#sound {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  width: 100px;
+  height: 100px;
+  margin-left: -50px;
+  z-index: 120;
+  background: url('/img/sound-icon-red.png') no-repeat center / contain;
+  transition: opacity 0.3s ease, transform 0.2s ease;
+  opacity: 0.75;
+}
+
+#sound:hover {
+  opacity: 1;
+  transform: scale(1.05);
+}
+
+#sound[aria-pressed='true'] {
+  background-image: url('/img/sound-icon-green.png');
+  opacity: 1;
+}
+
+/*
+ * The speaker was only ever a mobile necessity.
+ *
+ * The original called `$("#sound").toggle(kyryll.isMobile)` — it appeared on
+ * touch devices, where a gesture is required before any audio can play, and
+ * nowhere else. On the desktop the track simply starts, so a 100px icon
+ * planted in the middle of the scene is just something in the way.
+ *
+ * `display: none`, which is literally what .toggle(false) does, and not the
+ * `opacity: 0` this had before. That lost: both `#sound:hover` and
+ * `#sound[aria-pressed='true']` are (1,1,0) selectors and outrank a bare
+ * `#sound` at (1,0,0) whatever the media query, so the icon faded straight
+ * back in the moment the track started playing. Specificity does not care
+ * which rule you wrote last.
+ *
+ * Desktop keeps a mute on the space bar — see audio.ts. Nothing is rendered
+ * for it, so the scene stays as the original had it.
+ */
+@media (min-width: 1001px) {
+  #sound {
+    display: none;
+  }
+}
+
+/* ---- content column ----------------------------------------------------- */
+
+#main {
+  position: absolute;
+  width: 100%;
+}
+
+#container {
+  position: relative;
+  width: var(--stage-width);
+  height: var(--stage-height);
+  margin: 0 auto;
+  z-index: 70;
+  opacity: 0;
+  transition: opacity 7s ease;
+}
+
+#container[hidden] {
+  display: none;
+}
+
+#container[data-visible] {
+  opacity: 1;
+}
+
+.outer {
+  position: absolute;
+  width: var(--stage-width);
+  z-index: 20;
+}
+
+#intro   { top: 0; }
+#about   { top: 1000px; }
+#work    { top: 1960px; }
+#contact { top: 2815px; }
+
+/* ---- primary nav -------------------------------------------------------- */
+
+.nav {
+  float: left;
+  margin: 10px 0 0 0;
+}
+
+.nav li {
+  display: block;
+  float: left;
+}
+
+.nav li a {
+  display: block;
+  float: left;
+  margin: 5px 0 0;
+  overflow: hidden;
+  font-family: 'Chennai', Arial, sans-serif;
+  font-weight: 300;
+  color: #fff;
+  transition: opacity 0.25s ease;
+}
+
+.nav li.intro a {
+  margin: -10px 240px 0 20px;
+  width: 200px;
+  height: 111px;
+  font-size: 70px;
+}
+
+.nav li.about a,
+.nav li.work a {
+  margin: 0 30px 0 0;
+  font-size: 50px;
+}
+
+.nav li.about a { width: 140px; }
+.nav li.work a  { width: 120px; }
+
+.nav li.contact a {
+  margin: 0;
+  width: 175px;
+  font-size: 50px;
+}
+
+.nav li a:hover {
+  opacity: 0.75;
+}
+
+/* The current section's nav entry, set by nav.ts. */
+.nav li[data-current] a {
+  opacity: 1;
+  text-shadow: 0 0 18px rgba(255, 255, 255, 0.55);
+}
+
+/* ---- horizontally-cycling content panes -------------------------------- */
+
+/*
+ * A note on box-sizing.
+ *
+ * base.css applies `border-box` globally, which is the right default for the
+ * responsive layout added here — but the 2012 stylesheet was authored against
+ * `content-box`, and several of its boxes state a width or height *and* a
+ * padding expecting them to add up.
+ *
+ * `.sub` is the load-bearing case: 660px wide with 20px of side padding is a
+ * 700px pane, exactly filling the 700px window, and 290px tall with 10px of
+ * vertical padding is 310px, exactly one row. Under border-box those become
+ * 660x290, so every pane sits 40px narrower than the window it scrolls
+ * through — you see 660px of one pane and 40px of the next — and the third
+ * row of the About section cannot reach the top of the viewport at all.
+ *
+ * These few selectors are put back to content-box, and responsive.css returns
+ * them to border-box below the stage width where the panes go fluid.
+ */
+.content {
+  position: relative;
+  float: left;
+  width: 700px;
+  height: 310px;
+  margin: 30px 0 0 0;
+  overflow: hidden;
+}
+
+.section .sub,
+.subnav a {
+  box-sizing: content-box;
+}
+
+.section {
+  position: relative;
+  float: left;
+  clear: both;
+  width: 6000px;
+}
+
+.section .sub {
+  position: relative;
+  float: left;
+  width: 660px;
+  height: 290px;
+  padding: 10px 20px;
+  background: var(--panel);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.35) transparent;
+}
+
+.sub img {
+  float: right;
+  margin: 10px 0 10px 20px;
+  border: 1px solid #fff;
+  opacity: 0.8;
+}
+
+#work .sub img {
+  float: left;
+  margin: 0 20px 10px 0;
+  opacity: 1;
+}
+
+.next,
+.previous,
+.sitelink {
+  position: absolute;
+  display: block;
+  padding: 5px 10px;
+  background: var(--panel);
+  transition: background 0.2s ease;
+}
+
+.next     { right: 0; bottom: 0; }
+.previous { left: 0;  bottom: 0; }
+.sitelink { top: 0;   right: 0; }
+
+.next:hover,
+.previous:hover,
+.sitelink:hover {
+  opacity: 1;
+  background: var(--panel-strong);
+}
+
+/* ---- subnav ------------------------------------------------------------- */
+
+.subnav {
+  float: left;
+  clear: both;
+  width: 250px;
+  margin: 30px 0 0 10px;
+}
+
+.subnav li,
+.subnav a {
+  display: block;
+  float: left;
+  clear: both;
+}
+
+.subnav a {
+  width: 230px;
+  padding: 10px;
+  font-size: 1.7em;
+  line-height: 1.3;
+  text-shadow: var(--glow);
+  opacity: 0.6;
+  transition: opacity 0.2s ease, background 0.2s ease;
+}
+
+.subnav a:hover {
+  opacity: 1;
+}
+
+.subnav span {
+  display: block;
+}
+
+.subnav small {
+  display: block;
+  font-size: 0.5em;
+  text-transform: uppercase;
+}
+
+.subnav .scrolled {
+  background: var(--panel);
+  opacity: 1;
+}
+
+.subnav ul {
+  float: left;
+  clear: both;
+  width: 250px;
+}
+
+.subnav ul a {
+  font-size: 1em;
+  padding: 5px 0 5px 20px;
+  line-height: 1;
+  margin: 0;
+}
+
+/* ---- intro ------------------------------------------------------------- */
+
+#intro .welcome {
+  float: left;
+  clear: left;
+  width: 550px;
+  margin: 40px 0 20px 20px;
+}
+
+#intro .welcome p {
+  font-size: 1.3em;
+}
+
+#intro .folio {
+  float: right;
+  width: 391px;
+  margin-top: 50px;
+  position: relative;
+}
+
+#foliothumbs {
+  position: relative;
+  display: block;
+  width: 391px;
+  height: 289px;
+  overflow: hidden;
+}
+
+#foliothumbs > div {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  width: 391px;
+  opacity: 0;
+  transition: opacity 0.9s ease;
+}
+
+#foliothumbs > div[data-active] {
+  opacity: 1;
+}
+
+#foliothumbs img {
+  display: block;
+  margin: auto;
+}
+
+#intro .folio p {
+  position: absolute;
+  top: 265px;
+  left: 83px;
+  z-index: 25;
+}
+
+/* ---- ticked lists ------------------------------------------------------- */
+
+ul.services {
+  float: left;
+  margin: 10px 0 10px 20px;
+}
+
+ul.services li {
+  line-height: 1.8;
+  opacity: 0.9;
+  text-shadow: var(--glow);
+  padding-left: 25px;
+  background: url('/img/tick.png') no-repeat 0 3px;
+  background-size: 20px 50px;
+}
+
+ul.services li:hover {
+  background-position: 0 -27px;
+}
+
+/* ---- contact column ----------------------------------------------------- */
+
+.visitus {
+  float: right;
+  margin: 20px;
+  width: 330px;
+  text-align: right;
+}
+
+.visitus img {
+  width: 50px;
+  height: 50px;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+  opacity: 0.85;
+}
+
+.visitus a:hover img {
+  transform: translateY(-2px);
+  opacity: 1;
+}
