@@ -51,10 +51,12 @@ let paneToken = 0
 export function setupNav(): void {
   positionNavBlocks()
   applyScrollLock()
+  trackNavHeight()
 
   window.addEventListener('resize', () => {
     positionNavBlocks()
     applyScrollLock()
+    trackNavHeight()
   }, { passive: true })
 
   wireSectionLinks()
@@ -74,6 +76,57 @@ export function setupNav(): void {
 
 function isSectionId(value: string): value is SectionId {
   return (SECTIONS as readonly string[]).includes(value)
+}
+
+/**
+ * Publishes the docked nav's height as --nav-height.
+ *
+ * On the stacked layout the nav is `position: fixed`, so it covers whatever a
+ * scroll lands on. Its height is not a constant that can be hard-coded: the
+ * links wrap, so it is 68px at 390px wide and 102px at 320px. A guessed 5rem
+ * cleared the first and not the second, and the About sub-navigation arrived
+ * completely hidden underneath it.
+ *
+ * Measured and republished on resize, so both the column's top padding and the
+ * scroll-margin on every target derive from what the nav actually is.
+ */
+function trackNavHeight(): void {
+  const nav = $('#intro .nav')
+  if (!nav) return
+
+  const publish = (): void => {
+    // Zero on the desktop layout, where the nav is in flow and scrolls away.
+    const height = isNarrow() ? Math.round(nav.getBoundingClientRect().height) : 0
+    document.documentElement.style.setProperty('--nav-height', `${height}px`)
+  }
+
+  publish()
+
+  if ('ResizeObserver' in window) {
+    const observer = new ResizeObserver(publish)
+    observer.observe(nav)
+    // The root as well as the nav. A window that has not been laid out yet
+    // reports zero width, isNarrow() reads that as desktop, and the first
+    // measurement publishes 0 — the nav's own box may never change afterwards
+    // to trigger a correction.
+    observer.observe(document.documentElement)
+  }
+}
+
+/**
+ * How far a scroll target must clear the fixed nav, in pixels.
+ *
+ * Measured live rather than read back from --nav-height: the variable is for
+ * CSS, and a stale or not-yet-published value here would put the target under
+ * the nav with no way to tell.
+ */
+function navClearance(): number {
+  if (!isNarrow()) return 0
+
+  const nav = $('#intro .nav')
+  if (!nav) return 0
+
+  return Math.round(nav.getBoundingClientRect().height) + 12
 }
 
 /**
@@ -141,7 +194,9 @@ function scrollToSection(id: SectionId, opts: { push: boolean }): void {
   }
   currentSection = id
 
-  animateWindowScroll(section.offsetTop)
+  // scroll-margin-top handles scrollIntoView, but this is a manual scroll and
+  // has to subtract the fixed nav itself.
+  animateWindowScroll(Math.max(0, section.offsetTop - navClearance()))
 }
 
 function markCurrent(id: SectionId): void {

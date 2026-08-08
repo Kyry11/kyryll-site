@@ -149,12 +149,25 @@ app.http('contact', {
        * tell the truth: accepted, outcome not yet known. 202 is still a success
        * to the browser, so the visitor is not told to retry a message that is
        * probably on its way.
+       *
+       * The poller is aborted rather than merely abandoned. Racing it against a
+       * timer bounds the *response*, but leaves pollUntilDone running against
+       * the service after the handler returns — and a warm worker taking
+       * repeated slow sends accumulates those pollers indefinitely.
        */
+      const controller = new AbortController()
+      const polling = poller.pollUntilDone({ abortSignal: controller.signal })
+
+      // Aborting below rejects this promise. It is already the losing side of
+      // the race by then, so nothing would observe it and Node would report an
+      // unhandled rejection.
+      polling.catch(() => {})
+
       let timer
       let result
       try {
         result = await Promise.race([
-          poller.pollUntilDone(),
+          polling,
           new Promise((resolve) => {
             timer = setTimeout(() => resolve(POLL_TIMED_OUT), POLL_BUDGET_MS)
           }),
@@ -164,7 +177,8 @@ app.http('contact', {
       }
 
       if (result === POLL_TIMED_OUT) {
-        context.warn(`Email still sending after ${POLL_BUDGET_MS}ms; returning 202`)
+        controller.abort()
+        context.warn(`Email still sending after ${POLL_BUDGET_MS}ms; polling aborted, returning 202`)
         return json(202, { message: 'Message accepted — it is on its way' })
       }
 
@@ -173,6 +187,12 @@ app.http('contact', {
        * rejected or dropped send was reported to the visitor as "Message has
        * been sent", which is the worst possible answer: they believe they have
        * reached you and stop trying.
+       */
+      /*
+       * Note what Succeeded actually means: Azure has accepted and processed
+       * the message for delivery. It is not confirmation that a mailbox
+       * received it — that needs Event Grid or the operational logs. So this
+       * distinguishes "Azure refused it" from "Azure took it", and no further.
        */
       if (result?.status !== KnownEmailSendStatus.Succeeded) {
         context.error('Email did not succeed', result?.status, result?.error)

@@ -45,15 +45,29 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: faithful/package-lock.json
+          cache-dependency-path: |
+            faithful/package-lock.json
+            api/package-lock.json
 
-      - name: Install
+      - name: Install — site
         working-directory: faithful
         run: npm ci
 
-      - name: Typecheck and build
+      - name: Typecheck and build — site
         working-directory: faithful
         run: npm run build
+
+      # The API is deployed from source by Oryx, so nothing here used to
+      # install or exercise it — a syntax error or a broken handler would have
+      # reached production unchallenged, and only on a run where deployment was
+      # not skipped. Both steps are unconditional for that reason.
+      - name: Install — api
+        working-directory: api
+        run: npm ci
+
+      - name: Test — api
+        working-directory: api
+        run: npm test
 
       # The build and typecheck above are the part worth running on every PR.
       # Deployment needs a resource that may not exist yet, so it is skipped

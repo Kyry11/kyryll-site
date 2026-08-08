@@ -21,13 +21,27 @@ Delivers the contact form. Request body:
 `website` is a honeypot — it is hidden off-screen in the form, and a submission
 that fills it is silently discarded with a 200.
 
+## Rate limiting is best-effort
+
+The 429 above is not a guarantee, and should not be relied on as one. Counters
+live in the worker's memory, so they are lost on every cold start and are not
+shared when the host runs more than one instance — the real ceiling is
+five per IP *per live worker*, and it resets whenever Azure recycles the
+process. Functions are expected to be stateless; this is a deliberate
+exception, kept because it costs nothing and stops somebody leaning on the Send
+button.
+
+Anything stronger has to hold state somewhere durable or see the traffic in
+aggregate: a storage-backed counter, or rules at the CDN in front of the site.
+Neither is implemented here.
+
 | Status | Meaning |
 |---|---|
-| 200 | Delivered, confirmed by Azure (or honeypot silently discarded) |
+| 200 | Azure accepted and processed the message for delivery (or honeypot silently discarded). **Not** confirmation that a mailbox received it — `Succeeded` means "out for delivery", and real delivery confirmation needs Event Grid or the operational logs. |
 | 202 | Accepted, but Azure had not confirmed delivery within 20s. A Static Web Apps managed API is cut off at 45s, so the wait is bounded and the visitor is told the truth rather than shown a network error for a message that is probably on its way. |
 | 415 | Content-Type was not application/json |
 | 400 | Validation failure. Body carries `{ field, message }`; the front end rumbles that field. |
-| 429 | More than 5 submissions from one IP in an hour |
+| 429 | Best-effort rate limit tripped: more than 5 submissions from one IP in an hour, *as seen by a single worker*. See below. |
 | 500 | Email is not configured — see below |
 | 502 | The send finished in a state other than Succeeded, or Azure Communication Services rejected it outright |
 

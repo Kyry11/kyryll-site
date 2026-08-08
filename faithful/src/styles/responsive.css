@@ -53,10 +53,17 @@
   #container {
     width: 100%;
     height: auto;
-    /* Replaces the space the now-fixed nav no longer occupies in flow. The
-       nav measures ~68px at this width; 5rem leaves a little clearance if the
-       links wrap to a third line on a very narrow screen. */
-    padding: 5rem 0 96px;
+    /*
+     * Space for the fixed nav.
+     *
+     * max() of a measured value and a static floor, deliberately. --nav-height
+     * is republished by nav.ts as the nav wraps — 68px at 390px wide, 102px at
+     * 320px — but a measurement taken before layout settles can be stale, and
+     * a stale *small* value puts the first heading under the nav. 7rem clears
+     * the widest wrap seen at 320px on its own, so the variable can only ever
+     * add room, never remove it.
+     */
+    padding: max(calc(var(--nav-height, 0px) + 1rem), 7rem) 0 96px;
   }
 
   .outer {
@@ -117,7 +124,15 @@
     font-size: 34px;
   }
 
-  /* The nav is fixed, so the first section must not start underneath it. */
+  /* The nav is fixed, so anything scrolled to must clear it. Covers the
+     sub-panes reached with scrollIntoView; the section links scroll manually
+     and subtract the same clearance in nav.ts. */
+  .outer,
+  .section .sub {
+    /* Same floor-plus-measurement as the column padding above. */
+    scroll-margin-top: max(calc(var(--nav-height, 0px) + 1rem), 7rem);
+  }
+
   #intro {
     padding-top: 0;
   }
