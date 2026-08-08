@@ -53,7 +53,9 @@ const RATE_MAX_KEYS = 10_000
 const seen = new Map()
 
 /*
- * How long to wait for Azure to confirm delivery before answering anyway.
+ * How long to wait for Azure to complete the send operation before answering
+ * anyway. Completion means accepted and processed for delivery, not that a
+ * mailbox has received anything.
  *
  * A Static Web Apps managed API is cut off at 45 seconds. An unbounded
  * pollUntilDone() can outlast that, and the visitor would see a network failure
@@ -145,8 +147,8 @@ app.http('contact', {
       })
 
       /*
-       * Bounded wait. If Azure has not finished by the budget, stop waiting and
-       * tell the truth: accepted, outcome not yet known. 202 is still a success
+       * Bounded wait. If the send operation has not completed by the budget,
+       * stop waiting and tell the truth: accepted, outcome not yet known. 202 is still a success
        * to the browser, so the visitor is not told to retry a message that is
        * probably on its way.
        *

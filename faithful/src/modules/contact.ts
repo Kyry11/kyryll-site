@@ -116,8 +116,8 @@ async function send(
 
     /*
      * The server's own words, not a hardcoded success line. It answers 202 when
-     * the send was accepted but Azure had not confirmed delivery inside the
-     * request budget, and saying "has been sent" there would be a guess
+     * the message was accepted but the send operation had not completed inside
+     * the request budget, and saying "has been sent" there would be a guess
      * presented as a fact.
      */
     const body = (await response.json().catch(() => null)) as { message?: string } | null

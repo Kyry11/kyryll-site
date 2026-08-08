@@ -51,12 +51,14 @@ let paneToken = 0
 export function setupNav(): void {
   positionNavBlocks()
   applyScrollLock()
-  trackNavHeight()
+
+  // Observers are wired once. The resize handler only re-measures.
+  const publishNavHeight = trackNavHeight()
 
   window.addEventListener('resize', () => {
     positionNavBlocks()
     applyScrollLock()
-    trackNavHeight()
+    publishNavHeight()
   }, { passive: true })
 
   wireSectionLinks()
@@ -89,10 +91,16 @@ function isSectionId(value: string): value is SectionId {
  *
  * Measured and republished on resize, so both the column's top padding and the
  * scroll-margin on every target derive from what the nav actually is.
+ *
+ * Called exactly once, and returns the measurement function for the resize
+ * handler to call. Calling this per resize instead built a fresh
+ * ResizeObserver every time and never disconnected the last one — eight resize
+ * events left more than thirty live observers, all recomputing and writing the
+ * same custom property, and a rotating phone would keep adding to them.
  */
-function trackNavHeight(): void {
+function trackNavHeight(): () => void {
   const nav = $('#intro .nav')
-  if (!nav) return
+  if (!nav) return () => undefined
 
   const publish = (): void => {
     // Zero on the desktop layout, where the nav is in flow and scrolls away.
@@ -111,6 +119,8 @@ function trackNavHeight(): void {
     // to trigger a correction.
     observer.observe(document.documentElement)
   }
+
+  return publish
 }
 
 /**
