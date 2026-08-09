@@ -26,6 +26,11 @@ if os.environ.get('STUB_CURL_EXIT'):
     sys.exit(int(os.environ['STUB_CURL_EXIT']))
 if os.environ.get('STUB_CF_RAW'):
     print(os.environ['STUB_CF_RAW']); sys.exit(0)
+if ('-X POST' in a or '-X PUT' in a) and os.environ.get('STUB_DNS_LOG'):
+    body = ''
+    if '--data' in sys.argv:
+        body = sys.argv[sys.argv.index('--data') + 1]
+    open(os.environ['STUB_DNS_LOG'], 'a').write(body + "\n")
 if '-X DELETE' in a and os.environ.get('STUB_DELETE_LOG'):
     open(os.environ['STUB_DELETE_LOG'], 'a').write(a.split('dns_records/')[-1].split()[0] + "\n")
 if os.environ.get('STUB_CF_ZONE_FAIL'):
@@ -44,6 +49,13 @@ if 'dns_records' in a:
         else:
             out({"success": True, "result": []})
         sys.exit(0)
+    if 'kyryll.com' in a and ('type=TXT' in a or 'type%3DTXT' in a):
+        recs = []
+        if os.environ.get('STUB_HAS_SPF'):
+            recs.append({"id": "spf1", "type": "TXT", "content": "v=spf1 include:_spf.google.com -all"})
+        if os.environ.get('STUB_HAS_DMARC'):
+            recs.append({"id": "dm1", "type": "TXT", "content": "v=DMARC1; p=none; rua=mailto:me@kyryll.com"})
+        out({"success": True, "result": recs}); sys.exit(0)
     kind = os.environ.get('STUB_APEX', 'cname')
     if kind == 'cname':
         out({"success": True, "result": [{"id": "c1", "type": "CNAME", "name": "kyryll.com"}]})
@@ -72,6 +84,26 @@ fi
 if [[ "$*" == *"provider show"* ]]; then
   echo "${STUB_PROVIDER_STATE:-Registered}"; exit 0
 fi
+if [[ "$*" == *"communication email domain show"* && "$*" != *AzureManagedDomain* ]]; then
+  [ -n "${STUB_CUSTOM_DOMAIN_MISSING:-}" ] && exit 1
+  # Azure returns the full name here, as the portal dialog shows.
+  STUB_DOMAIN_FQDN="${CONTACT_SENDER_DOMAIN:-kyryll.com}"
+  states='{"Domain":{"status":"Verified"},"SPF":{"status":"Verified"},"DKIM":{"status":"Verified"},"DKIM2":{"status":"Verified"},"DMARC":{"status":"Verified"}}'
+  [ -n "${STUB_CUSTOM_PENDING:-}" ] && states='{"Domain":{"status":"Pending"}}'
+  # Ownership proved, sending records not configured — the expected state when
+  # only the TXT has been published.
+  [ -n "${STUB_PARTIAL_VERIFY:-}" ] && states='{"Domain":{"status":"Verified"},"SPF":{"status":"NotStarted"},"DKIM":{"status":"NotStarted"}}'
+  cat <<JSON
+{"id":"/sub/x/domains/custom",
+ "verificationRecords":{
+   "Domain":{"type":"TXT","name":"${STUB_DOMAIN_RECORD_NAME:-$STUB_DOMAIN_FQDN}","value":"ms-domain-verification=abc"},
+   "SPF":{"type":"TXT","name":"","value":"v=spf1 include:spf.protection.outlook.com -all"},
+   "DKIM":{"type":"CNAME","name":"selector1-azurecomm-prod-net._domainkey","value":"selector1-azurecomm-prod-net._domainkey.azurecomm.net"},
+   "DMARC":{"type":"TXT","name":"_dmarc","value":"v=DMARC1; p=none;"}},
+ "verificationStates":$states}
+JSON
+  exit 0
+fi
 if [[ "$*" == *"communication email domain show"* ]]; then
   [ -n "${STUB_DOMAIN_MISSING:-}" ] && exit 1
   if [[ "$*" == *"fromSenderDomain"* ]]; then echo "abc123.azurecomm.net"; else echo "/subscriptions/x/domains/AzureManagedDomain"; fi
@@ -83,7 +115,32 @@ if [[ "$*" == *"communication email show"* ]]; then
 fi
 if [[ "$*" == *"communication show"* ]]; then
   [ -n "${STUB_COMMS_MISSING:-}" ] && exit 1
+  # The linked-domain query drives whether the sender secret is rewritten, so
+  # it has to answer with an id rather than a placeholder.
+  if [[ "$*" == *"linkedDomains"* ]]; then
+    [ -n "${STUB_LINKED_READ_FAIL:-}" ] && exit 1
+    # Once the update has been applied, report the new domain.
+    if [ -n "${STUB_STATE:-}" ] && [ -f "${STUB_STATE}" ]; then
+      echo "/subscriptions/x/domains/AzureManagedDomain"; exit 0
+    fi
+    echo "${STUB_LINKED_DOMAIN:-/subscriptions/x/domains/AzureManagedDomain}"; exit 0
+  fi
   echo "exists"; exit 0
+fi
+if [[ "$*" == *"communication email domain create"* && "$*" == *"CustomerManaged"* ]]; then
+  [ -n "${STUB_CUSTOM_CREATE_FAIL:-}" ] && exit 1
+  echo created; exit 0
+fi
+if [[ "$*" == *"communication update"* ]]; then
+  # STUB_LINK_APPLIED models the ambiguous case: the change lands server-side
+  # and the CLI still reports failure.
+  [ -n "${STUB_LINK_APPLIED:-}" ] && : > "${STUB_STATE:-/dev/null}"
+  [ -n "${STUB_LINK_FAIL:-}" ] && exit 1
+  : > "${STUB_STATE:-/dev/null}"
+  exit 0
+fi
+if [[ "$*" == *"resource show"* ]]; then
+  echo "previous.azurecomm.net"; exit 0
 fi
 if [[ "$*" == *"communication list-key"* ]]; then
   [ -n "${STUB_NO_CONNECTION:-}" ] && { echo ""; exit 0; }
@@ -110,7 +167,8 @@ if [[ "$*" == *"secret list"* ]]; then
   echo "${STUB_EXISTING_SECRETS:-[]}"; exit 0
 fi
 if [[ "$*" == *"secret put"* ]]; then
-  cat >/dev/null
+  value=$(cat)
+  [ -n "${STUB_SECRET_VALUE_LOG:-}" ] && echo "${!#}=$value" >> "$STUB_SECRET_VALUE_LOG"
   [ -n "${STUB_SECRET_PUT_FAIL:-}" ] && exit 1
   [ -n "${STUB_SECRET_LOG:-}" ] && echo "${!#}" >> "$STUB_SECRET_LOG"
   exit 0
@@ -231,7 +289,7 @@ fi
 
 # Rotation must stay an explicit act, not something a deploy does silently.
 : > "$SECRET_LOG"
-check "leaves existing secrets alone"                0 \
+check "leaves existing secrets alone when nothing moved" 0 \
   env STUB_SECRET_LOG="$SECRET_LOG" \
       STUB_EXISTING_SECRETS='[{"name":"COMMUNICATION_SERVICES_CONNECTION_STRING"},{"name":"CONTACT_SENDER_ADDRESS"},{"name":"CONTACT_RECIPIENT_ADDRESS"}]' \
       "$D/provision-email.sh"
@@ -240,6 +298,93 @@ if [ ! -s "$SECRET_LOG" ]; then
 else
   printf '  FAIL  %s (%s)\n' "and overwrote nothing" "$(tr '\n' ' ' < "$SECRET_LOG")"; fail=$((fail + 1))
 fi
+
+# The sender is derived from whichever domain is linked, so when that changes
+# the secret has to follow — it cannot be read back and compared.
+#
+# STUB_STATE is what makes this the *success* case. Without it the update wrote
+# to /dev/null, the re-read still returned the old domain, and the script rolled
+# the sender back — so a test named for a successful change was exercising
+# rollback. The name-only assertion could not see it either: both the new write
+# and the rollback are CONTACT_SENDER_ADDRESS, and `sort -u` collapsed them into
+# one. wrangler publishes immediately, so the value that ends up set is the
+# whole point.
+: > "$SECRET_LOG"
+VALUE_LOG="$STUB/secretvalues"; : > "$VALUE_LOG"
+STATE="$STUB/linkstate"; rm -f "$STATE"
+check "rewrites the sender when the linked domain changes" 0 \
+  env STUB_LINKED_DOMAIN=/subscriptions/x/domains/SomeOtherDomain \
+      STUB_STATE="$STATE" STUB_SECRET_LOG="$SECRET_LOG" STUB_SECRET_VALUE_LOG="$VALUE_LOG" \
+      STUB_EXISTING_SECRETS='[{"name":"COMMUNICATION_SERVICES_CONNECTION_STRING"},{"name":"CONTACT_SENDER_ADDRESS"},{"name":"CONTACT_RECIPIENT_ADDRESS"}]' \
+      "$D/provision-email.sh"
+rm -f "$STATE"
+if [ "$(sort -u "$SECRET_LOG" | tr '\n' ' ')" = "CONTACT_SENDER_ADDRESS " ]; then
+  printf '  ok    %s\n' "and rewrites only the sender"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (%s)\n' "and rewrites only the sender" "$(tr '\n' ' ' < "$SECRET_LOG")"; fail=$((fail + 1))
+fi
+final=$(grep 'CONTACT_SENDER_ADDRESS=' "$VALUE_LOG" | tail -n1)
+if [ "$final" = "CONTACT_SENDER_ADDRESS=donotreply@abc123.azurecomm.net" ]; then
+  printf '  ok    %s\n' "and leaves it set to the new sender, not rolled back"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (%s)\n' "and leaves it set to the new sender, not rolled back" "$final"; fail=$((fail + 1))
+fi
+
+# The ordering that makes a failed write recoverable.
+#
+# Linking first and writing second left Azure on the new domain with the Worker
+# naming the old one — and the next deploy saw the link already correct, decided
+# nothing had changed, and left the stale secret alone for ever.
+: > "$SECRET_LOG"
+check "does not link when the sender secret cannot be written" 0 \
+  env STUB_LINKED_DOMAIN=/subscriptions/x/domains/SomeOtherDomain \
+      STUB_SECRET_PUT_FAIL=1 STUB_SECRET_LOG="$SECRET_LOG" "$D/provision-email.sh"
+expect_output "and says both sides stay put" "next deploy will retry" \
+  env STUB_LINKED_DOMAIN=/subscriptions/x/domains/SomeOtherDomain \
+      STUB_SECRET_PUT_FAIL=1 "$D/provision-email.sh"
+
+# The mirror image: the write succeeds and the link fails. wrangler publishes a
+# secret immediately, so without reconciling, the Worker would already be sending
+# as an address Azure has not authorised.
+: > "$SECRET_LOG"
+check "rolls the sender back when linking fails"     0 \
+  env STUB_LINKED_DOMAIN=/subscriptions/x/domains/SomeOtherDomain \
+      STUB_LINK_FAIL=1 STUB_SECRET_LOG="$SECRET_LOG" "$D/provision-email.sh"
+expect_output "and says what it rolled back to" "Sender rolled back to donotreply@previous.azurecomm.net" \
+  env STUB_LINKED_DOMAIN=/subscriptions/x/domains/SomeOtherDomain \
+      STUB_LINK_FAIL=1 "$D/provision-email.sh"
+
+# The ambiguous failure: az exits non-zero but the change landed server-side.
+#
+# Trusting the exit code here rolls the sender back to a domain Azure is no
+# longer linked to — and because the link then looks correct, every later deploy
+# concludes nothing changed and leaves the stale secret alone for ever.
+: > "$SECRET_LOG"
+STATE="$STUB/linkstate"; rm -f "$STATE"
+VALUE_LOG="$STUB/secretvalues"; : > "$VALUE_LOG"
+check "keeps the new sender when the link landed despite an error" 0 \
+  env STUB_LINKED_DOMAIN=/subscriptions/x/domains/SomeOtherDomain \
+      STUB_LINK_FAIL=1 STUB_LINK_APPLIED=1 STUB_STATE="$STATE" \
+      STUB_SECRET_LOG="$SECRET_LOG" STUB_SECRET_VALUE_LOG="$VALUE_LOG" "$D/provision-email.sh"
+rm -f "$STATE"
+# The exit code is 0 either way, so it proves nothing on its own — the value is
+# what distinguishes keeping the new sender from rolling it back.
+if ! grep -q 'CONTACT_SENDER_ADDRESS=donotreply@previous' "$VALUE_LOG"; then
+  printf '  ok    %s\n' "and never wrote the old sender back"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (%s)\n' "and never wrote the old sender back" "$(tr '\n' ' ' < "$VALUE_LOG")"; fail=$((fail + 1))
+fi
+expect_output "and says the update reported failure but landed" "reported failure, but Azure is linked" \
+  env STUB_LINKED_DOMAIN=/subscriptions/x/domains/SomeOtherDomain \
+      STUB_LINK_FAIL=1 STUB_LINK_APPLIED=1 STUB_STATE="$STATE" "$D/provision-email.sh"
+rm -f "$STATE"
+
+# An unreadable linked-domain list makes safe reconciliation impossible, so it
+# must stop rather than guess.
+check "stops when the linked domains cannot be read"  0 \
+  env STUB_LINKED_READ_FAIL=1 "$D/provision-email.sh"
+expect_output "and leaves the sender configuration alone" "leaving the sender configuration alone" \
+  env STUB_LINKED_READ_FAIL=1 "$D/provision-email.sh"
 
 # A failed read must not cause a working secret to be overwritten.
 #
@@ -281,6 +426,67 @@ check "warns, not fails, when a create is refused"   0 \
   env STUB_EMAIL_SVC_MISSING=1 STUB_CREATE_FAIL=1 "$D/provision-email.sh"
 check "warns, not fails, with no connection string"  0 env STUB_NO_CONNECTION=1 "$D/provision-email.sh"
 check "warns, not fails, when a secret put is denied" 0 env STUB_SECRET_PUT_FAIL=1 "$D/provision-email.sh"
+
+echo "custom-sender-domain.sh  (must publish the ownership TXT and nothing else)"
+export ZONE_NAME=kyryll.com EMAIL_SERVICE=kyryll-email
+export DOMAIN_VERIFY_ATTEMPTS=1 DOMAIN_VERIFY_SLEEP=0
+DNS_LOG="$STUB/dns"
+
+check "verifies a subdomain"                         0 \
+  env CONTACT_SENDER_DOMAIN=send.kyryll.com "$D/custom-sender-domain.sh"
+check "accepts the zone apex"                        0 \
+  env CONTACT_SENDER_DOMAIN=kyryll.com "$D/custom-sender-domain.sh"
+check "refuses a domain outside the zone"            0 \
+  env CONTACT_SENDER_DOMAIN=example.com "$D/custom-sender-domain.sh"
+expect_output "and says why" "not inside the zone" \
+  env CONTACT_SENDER_DOMAIN=example.com "$D/custom-sender-domain.sh"
+
+# The point of this one is that nothing happens to SPF or DMARC. They are live
+# mail configuration; proving ownership does not require touching either.
+: > "$DNS_LOG"
+check "publishes only the ownership record"          0 \
+  env CONTACT_SENDER_DOMAIN=kyryll.com STUB_CUSTOM_PENDING=1 STUB_HAS_SPF=1 STUB_HAS_DMARC=1 \
+      STUB_DNS_LOG="$DNS_LOG" "$D/custom-sender-domain.sh"
+if [ -s "$DNS_LOG" ] && ! grep -qiE 'v=spf1|v=DMARC1|_domainkey' "$DNS_LOG"; then
+  printf '  ok    %s\n' "and writes no SPF, DMARC or DKIM record"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (%s)\n' "and writes no SPF, DMARC or DKIM record" "$(tr '\n' ' ' < "$DNS_LOG")"; fail=$((fail + 1))
+fi
+# Azure returns the full domain as the record name. Appending the domain to it
+# produced kyryll.com.kyryll.com, which would never have verified.
+expect_output "writes the ownership TXT at the domain itself" "ownership: TXT kyryll.com$" \
+  env CONTACT_SENDER_DOMAIN=kyryll.com STUB_CUSTOM_PENDING=1 "$D/custom-sender-domain.sh"
+expect_output "and at the subdomain when that is the sender" "ownership: TXT send.kyryll.com$" \
+  env CONTACT_SENDER_DOMAIN=send.kyryll.com STUB_CUSTOM_PENDING=1 "$D/custom-sender-domain.sh"
+# A relative label still works, so this is not one assumption swapped for another.
+expect_output "still handles a relative label" "ownership: TXT _acme.kyryll.com$" \
+  env CONTACT_SENDER_DOMAIN=kyryll.com STUB_CUSTOM_PENDING=1 STUB_DOMAIN_RECORD_NAME=_acme \
+      "$D/custom-sender-domain.sh"
+
+# Ownership proved is not the same as able to send.
+expect_output "does not adopt the sender while SPF and DKIM are unverified" "Not sending from it yet" \
+  env CONTACT_SENDER_DOMAIN=kyryll.com STUB_PARTIAL_VERIFY=1 "$D/custom-sender-domain.sh"
+
+# DMARC is not in Azure's readiness set and commonly stays NotStarted for ever.
+expect_output "adopts the domain with DMARC still NotStarted" "All records verified" \
+  env CONTACT_SENDER_DOMAIN=kyryll.com "$D/custom-sender-domain.sh"
+
+# Republishing on every deploy contradicts "you can remove it once verified".
+: > "$DNS_LOG"
+check "does not rewrite the TXT once ownership is verified" 0 \
+  env CONTACT_SENDER_DOMAIN=kyryll.com STUB_DNS_LOG="$DNS_LOG" "$D/custom-sender-domain.sh"
+if [ ! -s "$DNS_LOG" ]; then
+  printf '  ok    %s\n' "and touches no DNS at all on that path"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (%s)\n' "and touches no DNS at all on that path" "$(tr '\n' ' ' < "$DNS_LOG")"; fail=$((fail + 1))
+fi
+
+check "warns, not fails, when ownership is still pending" 0 \
+  env CONTACT_SENDER_DOMAIN=send.kyryll.com STUB_CUSTOM_PENDING=1 "$D/custom-sender-domain.sh"
+expect_output "and says the record is published" "TXT record is published" \
+  env CONTACT_SENDER_DOMAIN=send.kyryll.com STUB_CUSTOM_PENDING=1 "$D/custom-sender-domain.sh"
+check "warns, not fails, when the domain cannot be created" 0 \
+  env CONTACT_SENDER_DOMAIN=send.kyryll.com STUB_CUSTOM_DOMAIN_MISSING=1 STUB_CUSTOM_CREATE_FAIL=1 "$D/custom-sender-domain.sh"
 
 echo
 printf '%s passed, %s failed\n' "$pass" "$fail"

@@ -136,6 +136,34 @@ Five GitHub encrypted secrets:
 | `CLOUDFLARE_ACCOUNT_ID` | Required by wrangler |
 | `CONTACT_RECIPIENT_ADDRESS` | Optional. Where contact-form mail lands; without it the form stays unprovisioned and answers 500 |
 
+One optional repository **variable** (not a secret — it is public DNS):
+
+| Variable | What it does |
+|---|---|
+| `CONTACT_SENDER_DOMAIN` | A domain you own, to send from instead of the free Azure-managed one. `kyryll.com`, or a subdomain such as `send.kyryll.com`. Unset means the managed domain. |
+
+Setting it makes the deploy register the domain on the Email Communication
+Service and publish **one** record: the `ms-domain-verification=…` TXT that
+proves you own it. That record is inert — it authorises nothing, it is additive,
+and Azure says it can be removed once verification completes — which is true
+here, because once ownership shows as verified the deploy stops writing it
+rather than republishing it on every run.
+
+Nothing else is touched. SPF, DKIM and DMARC are live mail configuration and the
+deploy does not write them. kyryll.com's SPF authorises Google Workspace and its
+DMARC carries real reporting addresses; both are left exactly as they are, and
+`scripts/deploy/test/run.sh` asserts that no record matching `v=spf1`,
+`v=DMARC1` or `_domainkey` is ever written.
+
+That has a consequence worth knowing: Azure will not *send* from a custom domain
+until its SPF and DKIM records are verified too, so proving ownership does not
+move the sender. The managed domain keeps sending and the deploy says so.
+
+Publish SPF and DKIM yourself and the next deploy asks Azure to re-check them —
+that reads DNS, it does not write it — and moves the sender across once Domain,
+SPF, DKIM and DKIM2 are all verified. DMARC is deliberately not in that set:
+Azure does not require it to send, and it commonly stays `NotStarted` for ever.
+
 `AZURE_LOCATION` is optional and defaults to `australiaeast`.
 `CLOUDFLARE_ZONE_ID` is optional; without it the cache is not purged and a
 deploy is visible once the edge TTL expires.
