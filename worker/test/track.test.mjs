@@ -297,6 +297,11 @@ test('an unavailable rate limiter drops the event rather than letting it through
       idFromName: (n) => n,
       get: () => ({ fetch: async () => new Response('<html>not json</html>', { status: 200 }) }),
     },
+    // Valid JSON, wrong shape. Coercion made this look like permission.
+    wrongShape: {
+      idFromName: (n) => n,
+      get: () => ({ fetch: async () => new Response('{}', { status: 200 }) }),
+    },
   }
 
   for (const [label, RATE_LIMITER] of Object.entries(broken)) {

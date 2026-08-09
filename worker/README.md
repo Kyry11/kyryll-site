@@ -125,7 +125,8 @@ stops the route being trivially scriptable, and the ceilings are what actually
 bound the damage.
 
 **Both ceilings fail closed.** If the limiter is unavailable, unreachable, or
-answers with something unreadable, the event is dropped. That is the opposite of
+answers with anything other than a real boolean — unreadable, or valid JSON that
+simply does not say — the event is dropped. That is the opposite of
 what the contact form does with the same signal, and both are right: a message
 from a real person is worth more than an accurate count, while an optional
 beacon is worth less than the email it would cost. Failing open here would mean

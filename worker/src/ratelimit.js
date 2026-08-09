@@ -146,8 +146,29 @@ export async function rateLimited(namespace, key, limit = MAX_IN_WINDOW, windowM
 
     if (!response.ok) return { limited: false, degraded: true }
 
-    const { limited } = await response.json()
-    return { limited: Boolean(limited), degraded: false }
+    const payload = await response.json()
+
+    /*
+     * The shape is checked, not coerced.
+     *
+     * `Boolean(payload.limited)` turned a 200 carrying `{}` into
+     * `{ limited: false, degraded: false }` — not merely wrong but confidently
+     * wrong, since `degraded` is the flag callers use to decide whether the
+     * answer can be trusted at all. A response that does not say what it means
+     * is exactly the case the flag exists for, so anything without a real
+     * boolean is reported as degraded and left to the caller: the contact form
+     * lets the message through, tracking drops the event.
+     */
+    if (
+      payload === null ||
+      typeof payload !== 'object' ||
+      Array.isArray(payload) ||
+      typeof payload.limited !== 'boolean'
+    ) {
+      return { limited: false, degraded: true }
+    }
+
+    return { limited: payload.limited, degraded: false }
   } catch {
     return { limited: false, degraded: true }
   }
