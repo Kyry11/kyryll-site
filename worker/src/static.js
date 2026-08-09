@@ -219,3 +219,72 @@ function decorate(response, path) {
     headers,
   })
 }
+
+/**
+ * Last-resort fetch of the origin, used when the normal path has thrown.
+ *
+ * This is the in-Worker equivalent of what happens when the Worker is disabled
+ * altogether: Cloudflare stops intercepting, the proxied apex record carries
+ * the request to the storage account, and the site is served raw. The deploy
+ * keeps that record pointed at the current account and registers the custom
+ * domain so the arrangement genuinely works — this function makes the same
+ * thing happen for a Worker that is running but broken.
+ *
+ * Two deliberate departures from "fail silently":
+ *
+ *   - The security headers are still applied. A fallback that served the site
+ *     without a CSP would turn any bug in this file into a silent security
+ *     regression, which is the failure mode the hardened 502 was added to
+ *     prevent in the first place. Availability is worth having; it is not worth
+ *     that.
+ *   - The response is marked no-store. A degraded response must not be cached
+ *     and then served long after the Worker recovers.
+ *
+ * The origin is fetched by its storage hostname rather than by re-requesting
+ * kyryll.com. A same-zone subrequest does bypass the Worker and reach the
+ * origin, so that would also work, but it depends on subtle routing semantics
+ * and on the DNS record being right; this does not.
+ */
+export async function passthrough(request, env) {
+  const origin = String(env.ORIGIN ?? '').replace(/\/+$/, '')
+  if (!origin) throw new Error('ORIGIN is not configured')
+
+  const url = new URL(request.url)
+  const path = url.pathname === '/' ? '/index.html' : url.pathname
+
+  const get = (at) => fetch(`${origin}${at}`, {
+    method: request.method === 'HEAD' ? 'HEAD' : 'GET',
+  })
+
+  let response = await get(path)
+
+  /*
+   * The fallback applies here too.
+   *
+   * Without it a degraded /about-me returned storage's error document with a
+   * 404 — the site's own navigation broken in a way the normal path handles,
+   * and only on the code path that runs when something has already gone wrong.
+   * A fallback that quietly changes the site's routing behaviour is worse than
+   * one that is obviously absent.
+   */
+  if (response.status === 404 && shouldFallBack(path)) {
+    response = await get('/index.html')
+    if (response.ok) {
+      response = new Response(response.body, { status: 200, headers: response.headers })
+    }
+  }
+
+  const headers = new Headers(response.headers)
+  for (const name of [...headers.keys()]) {
+    if (name.startsWith('x-ms-') || name.startsWith('x-azure-')) headers.delete(name)
+  }
+  headers.delete('server')
+  headers.set('cache-control', 'no-store')
+  harden(headers)
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  })
+}

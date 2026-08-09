@@ -7,14 +7,24 @@ name: Deploy
 # rewriting unmatched paths to index.html, and hosting the contact API. Storage
 # does none of those — it hands back a blob or a 404.
 #
-# Modelled on Kyry11/procsee's deploy-procsee-ui.yml, minus its custom-domain
-# handling. That workflow registers the domain on the storage account, which
-# needs an `asverify` CNAME on a *subdomain*; kyryll.com is an apex and Azure
-# rejects it. The Worker fetches the storage endpoint server-side, so storage
-# only ever sees its own hostname and never has to know the custom domain
-# exists. That removes the asverify record, the DNS propagation wait, the
-# grey-cloud/orange-cloud window, and the header-transform ruleset — the Worker
-# sets its own headers.
+# Modelled on Kyry11/procsee's deploy-procsee-ui.yml.
+#
+# The Worker fetches storage by its own hostname, so nothing about the main
+# serving path depends on Azure knowing the custom domain exists. The
+# custom-domain registration is here anyway, for the fallback: if the Worker is
+# ever disabled the proxied apex record carries requests straight to storage,
+# and Azure will only answer to `Host: kyryll.com` if that domain is registered
+# on the account.
+#
+# Verification goes through an `asverify` CNAME — the indirect method — which is
+# what makes this outage-free. Azure checks asverify.<domain> rather than the
+# apex record itself, so the apex is never unproxied, never repointed, and never
+# has to stop serving. That is also why the apex being a zone apex, which the
+# sibling workflow refuses outright, does not matter here: the record Azure
+# inspects is a subdomain regardless.
+#
+# The header-transform ruleset that workflow maintains is not needed: response
+# headers are set by the Worker.
 #
 # Every secret comes from GitHub encrypted secrets. Never inline: the workflow
 # this repository started with hard-coded a Cloudflare API token in plain text.
@@ -96,6 +106,13 @@ jobs:
       - name: Check the Worker configuration bundles
         working-directory: worker
         run: npx wrangler deploy --dry-run --var ORIGIN:https://example.invalid
+
+      # The deploy job never runs on a pull request, so without this the
+      # scripts that create, update and delete DNS records and register an
+      # Azure custom domain would first execute against production. Stubs
+      # replace curl/az/dig; nothing here reaches a network.
+      - name: Test — deploy scripts
+        run: scripts/deploy/test/run.sh
 
   # ---- deployment: master only, and the only job that sees a secret --------
   deploy:
@@ -238,6 +255,47 @@ jobs:
             --query "primaryEndpoints.web" -o tsv)
           # Trailing slash trimmed; the Worker joins ORIGIN + path directly.
           echo "STORAGE_ENDPOINT=${STORAGE_ENDPOINT%/}" >> "$GITHUB_ENV"
+
+          # The *web* host is the static-website endpoint the Worker fetches and
+          # the apex record points at. The *blob* host is a different hostname
+          # and is only used for the asverify record below — Azure verifies
+          # domain ownership against asverify.<blob host>, not the web one.
+          STORAGE_WEB_HOST=$(printf '%s' "${STORAGE_ENDPOINT%/}" | sed -E 's~^https?://~~')
+          STORAGE_BLOB_HOST=$(az storage account show \
+            --name "$AZURE_STORAGE_ACCOUNT" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query "primaryEndpoints.blob" -o tsv \
+            | sed -E 's~^https?://~~; s~/$~~')
+          echo "STORAGE_WEB_HOST=$STORAGE_WEB_HOST" >> "$GITHUB_ENV"
+          echo "STORAGE_BLOB_HOST=$STORAGE_BLOB_HOST" >> "$GITHUB_ENV"
+
+      # ---- the fallback path -----------------------------------------------
+      #
+      # None of this is needed for the site to work: the Worker route intercepts
+      # every request and fetches storage by its own hostname. It exists so that
+      # turning the Worker off leaves a working site behind, served by the
+      # proxied apex record straight from storage.
+      #
+      # The logic lives in scripts/deploy/ rather than inline, so that
+      # scripts/deploy/test/run.sh can exercise it against stubbed curl/az/dig
+      # in the validation job. A pull request never runs this job, so inline
+      # shell here would first execute against production.
+
+      - name: Resolve and verify the Cloudflare zone
+        if: ${{ env.CLOUDFLARE_ZONE_ID != '' }}
+        run: scripts/deploy/resolve-zone.sh
+
+      - name: Register the custom domain on the storage account
+        if: ${{ env.CLOUDFLARE_ZONE_ID != '' && env.ZONE_NAME != '' }}
+        run: scripts/deploy/register-custom-domain.sh
+
+      - name: Remove the asverify record
+        if: ${{ always() && env.ASVERIFY_NAME != '' && env.CLOUDFLARE_ZONE_ID != '' }}
+        run: scripts/deploy/remove-asverify.sh
+
+      - name: Point the apex record at the storage account
+        if: ${{ env.CLOUDFLARE_ZONE_ID != '' && env.ZONE_NAME != '' }}
+        run: scripts/deploy/point-apex.sh
 
       - name: Upload the build to $web
         run: |
