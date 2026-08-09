@@ -16,6 +16,7 @@
 
 import { serveStatic, passthrough } from './static.js'
 import { handleContact } from './contact.js'
+import { handleTrack } from './track.js'
 import { json, harden } from './http.js'
 
 export { RateLimiter } from './ratelimit.js'
@@ -51,7 +52,8 @@ export default {
       // path too, so this is not a regression, but a typo'd endpoint should
       // read as a missing endpoint rather than quietly returning the site.
       if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
-        if (url.pathname !== '/api/contact') {
+        const endpoint = url.pathname === '/api/contact' || url.pathname === '/api/track'
+        if (!endpoint) {
           return json(404, { message: 'No such endpoint' })
         }
 
@@ -60,6 +62,10 @@ export default {
           const response = json(405, { message: 'Expected POST' })
           response.headers.set('allow', 'POST')
           return response
+        }
+
+        if (url.pathname === '/api/track') {
+          return await handleTrack(request, env, ctx, log)
         }
 
         return await handleContact(request, env, log)
@@ -76,6 +82,15 @@ export default {
        * at the origin that could serve the endpoint anyway.
        */
       if (isApiPath(request)) {
+        /*
+         * Tracking stays silent even here. Answering 502 on this route and 204
+         * everywhere else would hand back exactly the signal the silence is
+         * there to withhold.
+         */
+        if (new URL(request.url).pathname === '/api/track') {
+          const headers = harden(new Headers({ 'cache-control': 'no-store' }))
+          return new Response(null, { status: 204, headers })
+        }
         return json(502, { message: 'Could not reach the server' })
       }
 

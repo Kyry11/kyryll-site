@@ -50,7 +50,11 @@ export class RateLimiter {
   }
 
   async fetch(request) {
-    const { now } = await request.json()
+    // The limit travels with the request rather than being baked in, because
+    // two routes want different ones: five submissions an hour for the contact
+    // form, ten events for tracking. The caller is this Worker, so there is
+    // nothing to validate — a visitor cannot reach the object directly.
+    const { now, limit } = await request.json()
 
     /*
      * Each evaluation waits for the previous one, explicitly.
@@ -65,19 +69,19 @@ export class RateLimiter {
      * construction; this holds under a fake that does not.
      */
     const evaluation = this.tail.then(
-      () => this.evaluate(now),
-      () => this.evaluate(now),
+      () => this.evaluate(now, limit),
+      () => this.evaluate(now, limit),
     )
     this.tail = evaluation.catch(() => {})
 
     return Response.json(await evaluation)
   }
 
-  async evaluate(now) {
+  async evaluate(now, limit = MAX_IN_WINDOW) {
     const times = (await this.state.storage.get('times')) ?? []
     const live = times.filter((t) => now - t < WINDOW_MS)
 
-    if (live.length >= MAX_IN_WINDOW) {
+    if (live.length >= limit) {
       /*
        * Deliberately no write on the refusal path. Rewriting the entry on every
        * rejected attempt would let someone hold their own bucket alive
@@ -108,20 +112,25 @@ export class RateLimiter {
 /**
  * Records an attempt and reports whether it should be refused.
  *
+ * The key is namespaced by the caller — `contact:<ip>`, `track:<ip>` — so the
+ * two routes count separately. Sharing one bucket would let a visitor browsing
+ * the site spend the allowance the contact form needs.
+ *
  * @param {DurableObjectNamespace | undefined} namespace
- * @param {string} ip
+ * @param {string} key
+ * @param {number} limit
  * @param {number} now
  * @returns {Promise<{ limited: boolean, degraded: boolean }>}
  */
-export async function rateLimited(namespace, ip, now = Date.now()) {
+export async function rateLimited(namespace, key, limit = MAX_IN_WINDOW, now = Date.now()) {
   // No binding at all — a test that does not care, or a misconfigured deploy.
   if (!namespace) return { limited: false, degraded: true }
 
   try {
-    const stub = namespace.get(namespace.idFromName(ip))
+    const stub = namespace.get(namespace.idFromName(key))
     const response = await stub.fetch('https://limiter/check', {
       method: 'POST',
-      body: JSON.stringify({ now }),
+      body: JSON.stringify({ now, limit }),
     })
 
     if (!response.ok) return { limited: false, degraded: true }

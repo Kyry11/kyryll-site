@@ -20,6 +20,7 @@
  */
 
 import { $, $$, isNarrow, prefersReducedMotion } from './dom'
+import { trackSection } from './track'
 
 const SECTIONS = ['intro', 'about', 'work', 'contact'] as const
 type SectionId = (typeof SECTIONS)[number]
@@ -275,6 +276,10 @@ function markCurrent(id: SectionId): void {
   for (const li of $$('.nav li')) {
     li.toggleAttribute('data-current', li.classList.contains(id))
   }
+
+  // The one place a scene becomes the current one, whether that came from the
+  // nav or from scrolling, so the tracker only needs this hook.
+  trackSection(id)
 }
 
 /**

@@ -9,6 +9,8 @@ src/index.js      routing
 src/static.js     serving the build out of blob storage
 src/http.js       security headers, JSON responses
 src/contact.js    POST /api/contact
+src/track.js      POST /api/track
+src/request.js    guards shared by both endpoints
 src/acs.js        Azure Communication Services, over REST
 src/ratelimit.js  rate limiting, in a Durable Object
 ```
@@ -85,6 +87,40 @@ fills it is silently discarded with a 200.
 | 429 | Rate limit tripped: more than 5 submissions from one IP in an hour. See below. |
 | 500 | Email is not configured — see Configuration |
 | 502 | The send reached a terminal state other than Succeeded, or ACS rejected it outright |
+
+## `POST /api/track`
+
+The 2012 site's visit tracking, restored. The original called an endpoint on
+every section change and emailed the result — visitor id, visit count, date of
+first visit — and this does the same, on a route of its own.
+
+**It answers 204 to everything.** Recorded, rate limited, malformed,
+cross-origin, unconfigured, broken: one response. That is deliberate. A limiter
+that answers 429 tells whoever hit it exactly where the ceiling is and how to
+pace themselves beneath it; one that never varies cannot be measured from
+outside.
+
+The cost of that is worth stating plainly: **this endpoint is unobservable when
+it breaks.** Nothing on the site will look wrong. The only evidence is mail that
+stops arriving, and the Worker's logs.
+
+| | |
+|---|---|
+| Limit | 10 events per IP per hour, in its own bucket — browsing cannot spend the contact form's five |
+| Body | Capped at 32 KB; individual fields truncated before they reach the email |
+| Send | Queued with `waitUntil` and not polled — nobody is waiting on the result, unlike the contact form |
+| Payload | Event, section, referrer, visitor id, visit count, first-seen date, plus the IP and Cloudflare's geo |
+
+`faithful/src/modules/track.ts` is the other half: `sendBeacon` where available
+so the last event of a visit survives the page closing, `fetch(keepalive)`
+otherwise, everything fire-and-forget and every path wrapped, because it is the
+least important code on the page and shares a thread with everything that
+matters.
+
+**One thing this does not do is ask.** It records IP addresses and browsing
+behaviour, which is personal data; for EU visitors GDPR and ePrivacy apply, and
+there is no notice or consent anywhere on the site. That is a decision to make
+deliberately rather than one to inherit from 2012.
 
 ## Rate limiting
 
