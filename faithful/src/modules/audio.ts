@@ -28,7 +28,7 @@
  * gesture has already happened long before the music is due.
  */
 
-import { isNarrow } from './dom'
+import { isNarrow, prefersReducedMotion } from './dom'
 
 const FIREWORK_MS = 1900
 
@@ -103,6 +103,24 @@ export function createAudio(): Audio {
    */
   const stabs: HTMLAudioElement[] = []
 
+  /**
+   * Hands a stab's buffer back. Safe to call twice.
+   *
+   * Defined out here rather than inside playFireworkStabs() because muting has
+   * to reach them too, and because the display is not the only thing that
+   * decides they are finished with.
+   */
+  const releaseStab = (stab: HTMLAudioElement): void => {
+    stab.pause()
+    stab.removeAttribute('src')
+    stab.load()
+  }
+
+  const releaseAllStabs = (): void => {
+    for (const stab of stabs) releaseStab(stab)
+    stabs.length = 0
+  }
+
   /*
    * The control reflects *intent*, not whether audio happens to be coming out
    * right now. The track is not due until the firework display ends, and a
@@ -164,6 +182,22 @@ export function createAudio(): Audio {
       // that it must not start later either.
       bed.pause()
       playing = false
+
+      /*
+       * And the stabs, which pausing the bed does not touch.
+       *
+       * A stab already past play() went on sounding for up to 1.9 s after the
+       * control said the sound was off — future ones were suppressed, but the
+       * one you could hear was not, which is the only one that matters to
+       * somebody pressing mute. Releasing rather than pausing is deliberate:
+       * it silences what is playing and gives back four buffered copies of a
+       * five-minute track at the same time.
+       *
+       * It is one-way. Un-muting during the ~13 s before the display gets the
+       * track but not the stabs, which is a fair trade for not holding the
+       * memory of somebody who asked for silence.
+       */
+      releaseAllStabs()
     } else {
       // Deliberately does not set `wantsTrack`. Un-muting says "let me hear
       // it", not "skip the cue" — if the display is still running, the track
@@ -236,6 +270,15 @@ export function createAudio(): Audio {
         // Nothing to do — playback will simply buffer later instead.
       }
 
+      /*
+       * Not under reduced motion. There is no firework display on that path, so
+       * playFireworkStabs() is never called — and it holds the only cleanup, so
+       * four buffered copies of the track stayed attached for the life of the
+       * page for exactly the visitors who asked for less. The bed is still
+       * primed: a motion preference says nothing about sound.
+       */
+      if (prefersReducedMotion()) return
+
       for (const _ of STAB_DELAYS) {
         const stab = new window.Audio()
         stab.src = bed.src
@@ -261,17 +304,8 @@ export function createAudio(): Audio {
        * attached for the life of the page. The one path that did release was
        * the one where they had already played.
        */
-      const release = (stab: HTMLAudioElement): void => {
-        stab.pause()
-        // Drop the buffer rather than leaving a decoded copy of the track
-        // parked for the life of the page.
-        stab.removeAttribute('src')
-        stab.load()
-      }
-
       if (muted) {
-        for (const stab of stabs) release(stab)
-        stabs.length = 0
+        releaseAllStabs()
         return
       }
 
@@ -283,7 +317,7 @@ export function createAudio(): Audio {
           // Muted between priming and this stab's turn: nothing to play, but
           // still something to give back.
           if (muted) {
-            release(stab)
+            releaseStab(stab)
             return
           }
 
@@ -291,7 +325,7 @@ export function createAudio(): Audio {
           // start. Resetting is what made these interrupt one another.
           void stab.play().catch(() => undefined)
 
-          setTimeout(() => release(stab), FIREWORK_MS)
+          setTimeout(() => releaseStab(stab), FIREWORK_MS)
         }, delay)
       })
     },
