@@ -289,18 +289,69 @@ test('the fallback does not honour a Range from the original request', async () 
   assert.equal(requested[1].headers.get('range'), null, 'Range must not reach the fallback fetch')
 })
 
-test('storage being unreachable is a hardened 502, not a runtime error page', async () => {
+test('storage being wholly unreachable is a hardened 502, not a runtime error page', async () => {
+  // Both the normal path and the fallback fail here, so 502 is the honest
+  // answer. The point is that an availability outage must not also be a
+  // security-header outage — Cloudflare's own error page carries none of these.
   const saved = globalThis.fetch
   globalThis.fetch = async () => { throw new TypeError('fetch failed: connection refused') }
 
   try {
     const res = await get('/')
     assert.equal(res.status, 502)
-    // The whole point: an availability outage must not also be a
-    // security-header outage. Cloudflare's own error page carries none of these.
     assert.match(res.headers.get('content-security-policy') ?? '', /default-src 'self'/)
     assert.equal(res.headers.get('x-content-type-options'), 'nosniff')
     assert.equal(res.headers.get('cache-control'), 'no-store')
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+test('a transient failure falls back to the origin rather than erroring', async () => {
+  // Same outcome as the Worker being switched off — the proxied apex record
+  // carries the request to storage — but reached from inside a Worker that is
+  // running and broken.
+  const saved = globalThis.fetch
+  let call = 0
+  globalThis.fetch = async (...args) => {
+    if (++call === 1) throw new TypeError('transient failure')
+    return saved(...args)
+  }
+
+  try {
+    const res = await get('/')
+    assert.equal(res.status, 200, 'the visitor gets the site, not an error')
+    assert.match(await res.text(), /site/)
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+test('the fallback still applies the security headers and refuses to be cached', async () => {
+  /*
+   * The reason this is not simply "fail silently". A fallback that served the
+   * site without a CSP would turn any bug in static.js into a silent security
+   * regression — exactly the failure the hardened 502 exists to prevent. And a
+   * degraded response must not be cached and then served after recovery.
+   */
+  const saved = globalThis.fetch
+  let call = 0
+  globalThis.fetch = async (...args) => {
+    if (++call === 1) throw new TypeError('transient failure')
+    return saved(...args)
+  }
+
+  try {
+    const res = await get('/')
+
+    assert.match(res.headers.get('content-security-policy') ?? '', /default-src 'self'/)
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff')
+    assert.match(res.headers.get('strict-transport-security') ?? '', /max-age=31536000/)
+    assert.equal(res.headers.get('cache-control'), 'no-store')
+    // And storage must still not be named.
+    for (const name of [...res.headers.keys()]) {
+      assert.ok(!name.startsWith('x-ms-') && !name.startsWith('x-azure-'), name)
+    }
   } finally {
     globalThis.fetch = saved
   }

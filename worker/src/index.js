@@ -14,11 +14,20 @@
  * site has a custom domain at all.
  */
 
-import { serveStatic } from './static.js'
+import { serveStatic, passthrough } from './static.js'
 import { handleContact } from './contact.js'
 import { json, harden } from './http.js'
 
 export { RateLimiter } from './ratelimit.js'
+
+function isApiPath(request) {
+  try {
+    const { pathname } = new URL(request.url)
+    return pathname === '/api' || pathname.startsWith('/api/')
+  } catch {
+    return false
+  }
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -59,6 +68,28 @@ export default {
       return await serveStatic(request, env)
     } catch (error) {
       log.error('Unhandled failure', error)
+
+      /*
+       * The API answers in JSON whatever happens. Falling back to the origin
+       * here would return storage's HTML error document to a caller expecting
+       * JSON, which is a worse answer than an honest 502 — and there is nothing
+       * at the origin that could serve the endpoint anyway.
+       */
+      if (isApiPath(request)) {
+        return json(502, { message: 'Could not reach the server' })
+      }
+
+      /*
+       * For the site, prefer serving something. This is the same outcome as
+       * the Worker being switched off — the proxied apex record carries the
+       * request to storage — reached from inside a Worker that is running but
+       * broken. The security headers are still applied; see passthrough().
+       */
+      try {
+        return await passthrough(request, env)
+      } catch (fallbackError) {
+        log.error('Fallback to storage also failed', fallbackError)
+      }
 
       const headers = harden(new Headers({
         'content-type': 'text/plain; charset=utf-8',

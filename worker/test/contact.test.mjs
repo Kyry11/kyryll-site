@@ -518,3 +518,44 @@ test('a declared Content-Length over the cap is refused without reading the body
   assert.equal(bodyTouched, false, 'the body must not be touched once the length is known')
   assert.equal(sent.length, 0)
 })
+
+test('a dead ACS is a JSON 502 from the handler itself', async () => {
+  // Note what this does *not* cover: handleContact catches send failures
+  // internally, so this never reaches the Worker's top-level catch. Named
+  // accordingly, because an earlier version of this test claimed to prove the
+  // API's fallback behaviour and proved only this.
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => { throw new TypeError('everything is down') }
+
+  try {
+    const res = await call(request({ headers: freshIp() }))
+    assert.equal(res.status, 502)
+    assert.equal(res.headers.get('content-type'), 'application/json')
+    assert.match((await res.json()).message, /server/i)
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+test('an unhandled throw on an API path answers JSON, never the site', async () => {
+  /*
+   * The top-level catch's API branch is defensive: everything handleContact can
+   * currently throw, it catches itself. This reaches the branch directly, by
+   * making the request object itself misbehave — otherwise the branch is
+   * unreachable from the tests and its removal would go unnoticed.
+   *
+   * Without it, a throw here falls through to passthrough() and hands a caller
+   * expecting JSON storage's HTML error document.
+   */
+  const stub = {
+    url: 'https://kyryll.com/api/contact',
+    method: 'POST',
+    headers: { get() { throw new Error('header access exploded') } },
+  }
+
+  const res = await worker.fetch(stub, makeEnv(), { console: quiet })
+
+  assert.equal(res.status, 502)
+  assert.equal(res.headers.get('content-type'), 'application/json')
+  assert.match(res.headers.get('content-security-policy') ?? '', /default-src 'self'/)
+})

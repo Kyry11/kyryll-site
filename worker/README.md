@@ -18,15 +18,39 @@ src/ratelimit.js  rate limiting, in a Durable Object
 Blob Storage is storage. It has no compute, and it cannot emit an arbitrary
 response header — a storage account only lets you set a fixed set of blob
 properties (`Cache-Control`, `Content-Type`, `Content-Encoding`,
-`Content-Language`, `Content-Disposition`). So the CSP, HSTS and the rest have
-nowhere to live, and there is nothing to run the contact form.
+`Content-Language`, `Content-Disposition`).
 
-Pointing a proxied Cloudflare record straight at the storage endpoint does not
-work either, because **kyryll.com is an apex domain**. Azure Storage only
-verifies a custom domain through a CNAME on a subdomain — the `asverify` record.
-Fetching the storage endpoint from inside the Worker sidesteps that entirely:
-storage only ever sees its own hostname and never has to know the site has a
-custom domain at all.
+That does **not** mean a Worker was the only way to get response headers. It is
+worth being exact, because the obvious reading is wrong: Cloudflare Transform
+Rules can set any response header at the edge with no code at all, and the
+sibling repo this deploy is modelled on does precisely that — it upserts a
+ruleset in the `http_response_headers_transform` phase for its own headers.
+Cache Rules cover the per-path TTL policy, and an Origin Rule with Host Header
+Override would even have solved the apex problem. A Worker-free version of the
+static half was entirely feasible.
+
+Three things forced this one, and only these three:
+
+1. **`/api/contact` needs compute**, on the same origin — otherwise the
+   `sameOrigin()` CSRF check and `connect-src 'self'` both break. No
+   arrangement of rules provides that.
+2. **The fallback rewrites a status code.** A missing page must return
+   index.html with a **200**, and Transform Rules cannot change a status code.
+3. **The storage headers are stripped by prefix.** Removal in a Transform Rule
+   is by exact name, and `x-ms-meta-*` is open-ended — the account can define
+   any metadata key it likes, so the set is not enumerable in advance.
+
+Given the first of those made a Worker unavoidable, doing the rest in the same
+place beat splitting the behaviour across three Cloudflare rulesets *and* code.
+That is a preference about where the logic lives, not a claim that it had
+nowhere else to go.
+
+Pointing a proxied Cloudflare record straight at the storage endpoint has its
+own problem: **kyryll.com is an apex domain**, and Azure Storage verifies a
+custom domain through a CNAME on a subdomain — the `asverify` record. Fetching
+the storage endpoint from inside the Worker sidesteps that for the main path.
+The deploy registers the custom domain anyway, via `asverify`, so that the
+proxied apex record remains a working fallback if the Worker is ever disabled.
 
 That replaced an Azure Static Web App, which had bundled four separate jobs:
 serving the build, applying response headers, rewriting unmatched paths to
@@ -142,6 +166,30 @@ Object is addressed by class name — so nothing is substituted into that file.
 `ALLOW_LOCALHOST_ORIGIN` must never be set in production. It exists so that Vite
 serving the front end on another port can post to a locally running Worker; it
 relaxes the cross-origin check to accept any localhost page.
+
+## When the Worker fails
+
+An unhandled exception used to reach Cloudflare's own error page: no CSP, no
+HSTS, nothing a visitor could interpret. So an availability outage was also a
+security-header outage.
+
+Now the site falls back to fetching storage directly — the same outcome as the
+Worker being switched off, where the proxied apex record carries the request —
+reached from inside a Worker that is running and broken. Two deliberate
+departures from failing silently:
+
+- **The security headers are still applied.** A fallback that served the site
+  without a CSP would turn any bug in `static.js` into a silent security
+  regression, which is the failure the hardened 502 exists to prevent.
+- **The response is `no-store`**, so a degraded response is not cached and then
+  served long after recovery.
+
+`/api/contact` does not fall back. Storage has nothing that could serve the
+endpoint, and returning its HTML error document to a caller expecting JSON is a
+worse answer than an honest 502.
+
+If the fallback fetch fails too — storage genuinely unreachable — the hardened
+502 still applies.
 
 ## Compatibility date
 

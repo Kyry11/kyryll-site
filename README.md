@@ -139,12 +139,19 @@ Five GitHub encrypted secrets:
 `CLOUDFLARE_ZONE_ID` is optional; without it the cache is not purged and a
 deploy is visible once the edge TTL expires.
 
-The Cloudflare token needs four scopes. Account-level **Workers Scripts: Edit**
-is the obvious one, but `wrangler.toml` binds the Worker to routes by
-`zone_name`, so resolving that zone and creating the routes also needs zone-level
-**Zone: Read** and **Workers Routes: Edit** — with only the account scope the
-deploy gets as far as route creation and fails there. **Cache Purge: Purge**
-covers the last step. (Cache Purge has no *Edit* level, only Purge.)
+The Cloudflare token needs five scopes:
+
+| Scope | Permission | Why |
+|---|---|---|
+| Account | Workers Scripts: Edit | uploads the Worker and its Durable Object |
+| Zone | Workers Routes: Edit | binds `kyryll.com/*` |
+| Zone | Zone: Read | `wrangler.toml` resolves the zone by `zone_name` |
+| Zone | DNS: Edit | the `asverify` record and the apex record |
+| Zone | Cache Purge: Purge | the final step |
+
+Zone: Read is the one people miss — without it wrangler cannot turn
+`zone_name = "kyryll.com"` into a zone and fails at route creation, having
+appeared to work. Cache Purge has no *Edit* level, only Purge.
 
 Until those exist the workflow still installs, typechecks, builds and runs the
 Worker's tests — it skips only the deploy and says so, rather than failing. A
@@ -164,12 +171,33 @@ departed hash on the spot breaks visitors who are mid-visit. Everything in the
 current build is re-uploaded every deploy, so anything still in use keeps a
 fresh timestamp and never ages out.
 
-No DNS change is needed at cutover. A Worker route only fires for a hostname
-that already has a **proxied** DNS record, and kyryll.com has one — it points at
-the old storage endpoint today. Once the route exists the Worker intercepts
-before the origin is consulted, so the record's target stops mattering while
-still being what makes the route fire. Deleting it, or turning the proxy off,
-takes the site down.
+A Worker route only fires for a hostname that already has a **proxied** DNS
+record. Once the route exists the Worker intercepts before the origin is
+consulted, so nothing about serving the site depends on where that record
+points — but deleting it, or turning the proxy off, takes the site down.
+
+### The fallback
+
+The deploy keeps that record pointed at the current storage account and
+registers the account's custom domain, so switching the Worker off leaves a
+working site rather than a broken one. Azure only answers to `Host: kyryll.com`
+if the domain is registered, and verification goes through an `asverify` CNAME —
+the indirect method — so the apex record is never unproxied or repointed and
+there is no outage window. That is also why the apex being a zone apex is not
+the obstacle it first appears: the record Azure inspects is a subdomain either
+way.
+
+The apex step is deliberately non-destructive. That record is what makes the
+route fire at all, so it updates a CNAME it finds and creates one where the apex
+is empty, but if it finds A/AAAA records it reports and stops rather than
+deleting them.
+
+**One precondition, and it is easy to miss.** The fallback reaches storage over
+HTTPS with `Host: kyryll.com`, and Azure Storage has no certificate for a custom
+domain — it serves its own `*.web.core.windows.net`. Under SSL/TLS mode **Full
+(Strict)** Cloudflare validates that and returns 526, so the fallback would be
+dead on arrival. **Full** is required. The deploy reads the zone's mode and
+warns rather than failing, since only the safety net is affected.
 
 The contact form additionally needs three Worker secrets, set once with
 `wrangler secret put` so the workflow never handles them. See
