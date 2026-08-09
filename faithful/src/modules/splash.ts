@@ -107,7 +107,24 @@ async function dismiss(splash: HTMLElement, duration: number): Promise<void> {
  * laid out, and a window still reporting 0 width would skip the effect for
  * the rest of the session.
  */
-export async function revealNav(): Promise<void> {
+/**
+ * Splitting is separated from revealing, and has to happen before the content
+ * column fades in.
+ *
+ * The nav is inside #container, so it faded up with everything else as ordinary
+ * text — and then, ten seconds later, splitIntoLetters() replaced that text
+ * with .ct-letter spans at opacity 0 and the nav vanished before animating back
+ * in. Visitors saw it arrive, disappear, and arrive again. Splitting while the
+ * column is still transparent means the letters are already in place and
+ * already invisible, so the only appearance is the intended one.
+ *
+ * By the time this runs the splash has played and the window has been laid out,
+ * so isNarrow() is answerable — which is what previously argued for splitting
+ * late.
+ */
+let pending: { brand: HTMLElement; links: HTMLElement[]; brandLetters: number } | null = null
+
+export function prepareNav(): void {
   if (prefersReducedMotion() || isNarrow()) return
 
   const intro = $('#intro')
@@ -127,9 +144,19 @@ export async function revealNav(): Promise<void> {
     link.style.setProperty('--ct-step', '38ms')
   }
 
-  // Commit the invisible split before switching the animation on, so the
-  // browser never paints a frame of blank nav.
-  void intro.offsetHeight
+  pending = { brand, links, brandLetters }
+}
+
+export async function revealNav(): Promise<void> {
+  // Null when prepareNav() declined — reduced motion, or the stacked layout,
+  // where the nav is plain text and simply visible.
+  if (!pending) return
+
+  const { brand, links, brandLetters } = pending
+
+  // Commit the split before switching the animation on, so the browser never
+  // paints a frame of blank nav.
+  void brand.offsetHeight
 
   brand.setAttribute('data-reveal', '')
   await wait(brandLetters * 55 + 200)

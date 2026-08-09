@@ -26,7 +26,7 @@ import './styles/responsive.css'
 // TEMPORARY — canvas boundary overlay, inert unless ?debug is in the URL.
 import './styles/debug.css'
 
-import { playSplash, revealNav } from './modules/splash'
+import { playSplash, prepareNav, revealNav } from './modules/splash'
 import { setupCloudsParallax, setupTreeline } from './modules/scenes'
 import { setupNav } from './modules/nav'
 import { setupCarousel } from './modules/carousel'
@@ -101,6 +101,14 @@ async function revealMainContent(audio: ReturnType<typeof createAudio>): Promise
     audio.playFireworkStabs()
     void wait(25_000).then(() => audio.startTrack())
   }
+
+  /*
+   * Split the nav's letters before the column becomes visible, not after.
+   * They are invisible until revealNav() marks them, so doing it here means the
+   * nav does not appear as plain text, vanish when it is split, and appear a
+   * second time. See prepareNav().
+   */
+  prepareNav()
 
   container.hidden = false
   // Force a reflow so the transition has a start value to animate from.

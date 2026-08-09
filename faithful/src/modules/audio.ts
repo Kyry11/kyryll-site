@@ -33,6 +33,22 @@ import { isNarrow } from './dom'
 const FIREWORK_MS = 1900
 
 /*
+ * When each stab fires, relative to the display starting. The original's
+ * timings, unchanged.
+ */
+const STAB_DELAYS = [0, 1000, 1300, 1800] as const
+
+/*
+ * Louder than the bed, because the sprite is quieter than the music.
+ *
+ * The stabs play the track's first 1.9 s — that is what Howler's
+ * `firework: [0, 1900]` sprite was. Measured, that opening averages -21.2 dBFS
+ * against -13.1 for the body of the track, and it decays to -31 dB by 1.75 s.
+ * At the bed's own 0.55 it is barely there.
+ */
+const STAB_VOLUME = 0.7
+
+/*
  * Deliberately not the key the earlier build used ('kyryll:sound'). That one
  * recorded on/off with sound defaulting to *off*, so a stored 'off' says
  * nothing about whether the visitor ever chose silence — reading it here would
@@ -68,6 +84,24 @@ export function createAudio(): Audio {
   let playing = false
   let wantsTrack = false
   let armed = false
+
+  /*
+   * One element per stab, built and buffered during the cold open.
+   *
+   * Both halves of that matter, and the previous arrangement got both wrong.
+   * It created a single element at the moment the display started and replayed
+   * it by resetting currentTime, which meant the four stabs interrupted each
+   * other instead of layering — and, worse, the element never buffered: live,
+   * the first stab fired at readyState 0 and the rest at 1, so play() resolved
+   * (playback *began*) while there was no decoded audio to emit. Restarting it
+   * every 300 ms is what stopped it ever getting any. Nothing was audible.
+   *
+   * Separate elements can overlap, which is what Howler did with a sprite, and
+   * loading them alongside the bed gives them the whole cold open to buffer.
+   * They share one URL, so the browser fetches it once and serves the rest from
+   * cache.
+   */
+  const stabs: HTMLAudioElement[] = []
 
   /*
    * The control reflects *intent*, not whether audio happens to be coming out
@@ -201,40 +235,44 @@ export function createAudio(): Audio {
       } catch {
         // Nothing to do — playback will simply buffer later instead.
       }
+
+      for (const _ of STAB_DELAYS) {
+        const stab = new window.Audio()
+        stab.src = bed.src
+        stab.volume = STAB_VOLUME
+        stab.preload = 'auto'
+        try {
+          stab.load()
+        } catch {
+          // As above.
+        }
+        stabs.push(stab)
+      }
     },
 
     playFireworkStabs(): void {
       if (muted) return
 
-      /*
-       * One element, reused. The original played a Howler sprite off a single
-       * decoded buffer; constructing four `Audio(bed.src)` instead pulled the
-       * whole 3.6 MB track down again for each 1.9 s stab, and `pause()` alone
-       * never released them.
-       *
-       * Reusing one element means the stabs cannot overlap — at 1000/1300/1800
-       * ms against a 1900 ms tail they would have anyway, so this also stops
-       * three copies of the same opening bar playing over each other.
-       */
-      const stab = new window.Audio(bed.src)
-      stab.volume = 0.4
-      stab.preload = 'auto'
+      STAB_DELAYS.forEach((delay, i) => {
+        const stab = stabs[i]
+        if (!stab) return
 
-      for (const delay of [0, 1000, 1300, 1800]) {
         setTimeout(() => {
           if (muted) return
-          stab.currentTime = 0
-          void stab.play().catch(() => undefined)
-        }, delay)
-      }
 
-      setTimeout(() => {
-        stab.pause()
-        // Drop the buffer rather than leaving a decoded copy of the track
-        // parked for the life of the page.
-        stab.removeAttribute('src')
-        stab.load()
-      }, 1800 + FIREWORK_MS)
+          // No currentTime reset: each element is played once, from its own
+          // start. Resetting is what made these interrupt one another.
+          void stab.play().catch(() => undefined)
+
+          setTimeout(() => {
+            stab.pause()
+            // Drop the buffer rather than leaving a decoded copy of the track
+            // parked for the life of the page.
+            stab.removeAttribute('src')
+            stab.load()
+          }, FIREWORK_MS)
+        }, delay)
+      })
     },
 
     startTrack(): void {

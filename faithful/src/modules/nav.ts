@@ -55,10 +55,30 @@ export function setupNav(): void {
   // Observers are wired once. The resize handler only re-measures.
   const publishNavHeight = trackNavHeight()
 
+  let wasNarrow = isNarrow()
+
   window.addEventListener('resize', () => {
     positionNavBlocks()
+
+    const nowNarrow = isNarrow()
     applyScrollLock()
     publishNavHeight()
+
+    /*
+     * Crossing back to the desktop layout re-locks scrolling, and whatever
+     * scroll position the stacked layout was left at is frozen in place.
+     * Anywhere between two scenes that means a viewport of nothing in
+     * particular, with the nav — the only way to move on a locked page — out of
+     * sight above or below. The site becomes genuinely unusable, and resizing
+     * back is not an obvious remedy.
+     *
+     * Snapping to the nearest scene puts the visitor somewhere composed, which
+     * is the only state the desktop layout has. Not animated: this is a window
+     * being resized, not a journey between scenes.
+     */
+    if (wasNarrow && !nowNarrow) snapToNearestSection()
+
+    wasNarrow = nowNarrow
   }, { passive: true })
 
   wireSectionLinks()
@@ -155,6 +175,45 @@ function navClearance(): number {
  * The stacked layout below --stage-width scrolls normally; there is nothing to
  * cycle through there.
  */
+/**
+ * Jumps to whichever scene the page is currently closest to.
+ *
+ * Distance is measured from each section's top to the current scroll offset,
+ * so a page left halfway down About lands on About rather than being thrown
+ * back to the top.
+ */
+function snapToNearestSection(): void {
+  const sections = SECTIONS.map((id) => document.getElementById(id)).filter(
+    (el): el is HTMLElement => el !== null,
+  )
+  if (sections.length === 0) return
+
+  const current = window.scrollY
+  let nearest = sections[0]
+  let shortest = Infinity
+
+  for (const section of sections) {
+    const top = section.getBoundingClientRect().top + window.scrollY
+    const distance = Math.abs(top - current)
+    if (distance < shortest) {
+      shortest = distance
+      nearest = section
+    }
+  }
+
+  if (!nearest) return
+
+  // Already there, near enough; do not fight a resize that is still in flight.
+  if (shortest < 2) return
+
+  window.scrollTo(0, nearest.getBoundingClientRect().top + window.scrollY)
+
+  const id = nearest.id
+  if (SECTIONS.includes(id as SectionId)) {
+    history.replaceState({ section: id }, '', `#${id}`)
+  }
+}
+
 function applyScrollLock(): void {
   document.documentElement.toggleAttribute('data-scroll-lock', !isNarrow())
 }
