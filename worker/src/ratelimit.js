@@ -54,7 +54,10 @@ export class RateLimiter {
     // two routes want different ones: five submissions an hour for the contact
     // form, ten events for tracking. The caller is this Worker, so there is
     // nothing to validate — a visitor cannot reach the object directly.
-    const { now, limit } = await request.json()
+    // Limit and window both travel with the request. Three callers want three
+    // different pairs: five an hour per IP for the contact form, ten an hour
+    // per IP for tracking, and one hundred every two hours across everyone.
+    const { now, limit, window } = await request.json()
 
     /*
      * Each evaluation waits for the previous one, explicitly.
@@ -69,17 +72,17 @@ export class RateLimiter {
      * construction; this holds under a fake that does not.
      */
     const evaluation = this.tail.then(
-      () => this.evaluate(now, limit),
-      () => this.evaluate(now, limit),
+      () => this.evaluate(now, limit, window),
+      () => this.evaluate(now, limit, window),
     )
     this.tail = evaluation.catch(() => {})
 
     return Response.json(await evaluation)
   }
 
-  async evaluate(now, limit = MAX_IN_WINDOW) {
+  async evaluate(now, limit = MAX_IN_WINDOW, windowMs = WINDOW_MS) {
     const times = (await this.state.storage.get('times')) ?? []
-    const live = times.filter((t) => now - t < WINDOW_MS)
+    const live = times.filter((t) => now - t < windowMs)
 
     if (live.length >= limit) {
       /*
@@ -99,7 +102,7 @@ export class RateLimiter {
      * write, which is what makes it track the newest entry rather than the
      * oldest.
      */
-    await this.state.storage.setAlarm(now + WINDOW_MS + 60_000)
+    await this.state.storage.setAlarm(now + windowMs + 60_000)
 
     return { limited: false }
   }
@@ -118,11 +121,19 @@ export class RateLimiter {
  *
  * @param {DurableObjectNamespace | undefined} namespace
  * @param {string} key
+ * `degraded` says the answer is not trustworthy — no binding, an unreachable
+ * object, an unreadable reply. What to do about that is the caller's decision
+ * and the two callers here make opposite ones: the contact form lets a message
+ * through, because refusing everybody over a broken counter is worse than
+ * miscounting; tracking drops the event, because it is optional and every one
+ * that gets past costs an email.
+ *
  * @param {number} limit
+ * @param {number} windowMs
  * @param {number} now
  * @returns {Promise<{ limited: boolean, degraded: boolean }>}
  */
-export async function rateLimited(namespace, key, limit = MAX_IN_WINDOW, now = Date.now()) {
+export async function rateLimited(namespace, key, limit = MAX_IN_WINDOW, windowMs = WINDOW_MS, now = Date.now()) {
   // No binding at all — a test that does not care, or a misconfigured deploy.
   if (!namespace) return { limited: false, degraded: true }
 
@@ -130,7 +141,7 @@ export async function rateLimited(namespace, key, limit = MAX_IN_WINDOW, now = D
     const stub = namespace.get(namespace.idFromName(key))
     const response = await stub.fetch('https://limiter/check', {
       method: 'POST',
-      body: JSON.stringify({ now, limit }),
+      body: JSON.stringify({ now, limit, window: windowMs }),
     })
 
     if (!response.ok) return { limited: false, degraded: true }

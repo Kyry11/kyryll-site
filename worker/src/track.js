@@ -24,7 +24,7 @@
 import { harden } from './http.js'
 import { rateLimited } from './ratelimit.js'
 import { beginSend } from './acs.js'
-import { MAX_BODY_BYTES, BodyTooLarge, readBounded, clientIp, sameOrigin } from './request.js'
+import { MAX_BODY_BYTES, BodyTooLarge, readBounded, clientIp } from './request.js'
 
 /*
  * Ten events per IP per hour, as asked. Enough for a visitor to arrive and move
@@ -33,6 +33,30 @@ import { MAX_BODY_BYTES, BodyTooLarge, readBounded, clientIp, sameOrigin } from 
  * remember rather than two.
  */
 const TRACK_LIMIT = 10
+const TRACK_WINDOW_MS = 60 * 60 * 1000
+
+/*
+ * A ceiling across everybody, not just per visitor.
+ *
+ * A per-IP cap bounds one sender and nothing else: the route is reachable by
+ * anything that can make an HTTPS request, so a hundred addresses is a hundred
+ * times ten emails, and the bill is real. This is one bucket shared by the
+ * whole zone — a hundred events every two hours, after which the route records
+ * nothing until the window rolls.
+ *
+ * Sized for a personal site: a hundred events is roughly twenty attentive
+ * visits, which is a great deal more traffic than this gets and a great deal
+ * less than an inbox can absorb. It is a spend ceiling, not a capacity plan.
+ */
+const ZONE_LIMIT = 100
+const ZONE_WINDOW_MS = 2 * 60 * 60 * 1000
+
+/*
+ * Only these. Both fields reach an email subject, and an allowlist is the
+ * difference between a field and an arbitrary string somebody else chooses.
+ */
+const EVENTS = new Set(['arrived', 'section'])
+const SECTIONS = new Set(['', 'intro', 'about', 'work', 'contact'])
 
 /** Fields the beacon may set, and how much of each is kept. */
 const FIELDS = {
@@ -54,7 +78,19 @@ export async function handleTrack(request, env, ctx, log = console) {
   try {
     const essence = (request.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
     if (essence !== 'application/json') return nothing()
-    if (!sameOrigin(request, env)) return nothing()
+
+    /*
+     * Stricter than the contact form, deliberately.
+     *
+     * sameOrigin() lets a request with no Origin through, because curl and
+     * server-side callers are not the CSRF case and a real person may have
+     * something to say. Nothing legitimate posts here except a browser on this
+     * site, so the header must be present and must match. It is not
+     * authentication — anything can forge it — but it stops the route being
+     * trivially scriptable, and the two ceilings below are what actually bound
+     * the damage.
+     */
+    if (!fromThisSite(request, env)) return nothing()
 
     let body
     try {
@@ -66,10 +102,33 @@ export async function handleTrack(request, env, ctx, log = console) {
 
     if (body === null || typeof body !== 'object' || Array.isArray(body)) return nothing()
 
+    const event = pick(body.event, EVENTS, 'arrived')
+    const section = pick(body.section, SECTIONS, '')
+    if (event === null || section === null) return nothing()
+
     const ip = clientIp(request)
 
-    const { limited } = await rateLimited(env.RATE_LIMITER, `track:${ip}`, TRACK_LIMIT)
-    if (limited) return nothing()
+    /*
+     * Per sender first, then across everybody. In that order a single noisy
+     * address is stopped by its own bucket before it can spend the shared one.
+     *
+     * `degraded` drops the event rather than letting it through. The contact
+     * form makes the opposite call, and both are right: a message from a real
+     * person is worth more than an accurate count, and an optional beacon is
+     * worth less than the email it would cost. Failing open here would mean a
+     * limiter outage removed the only ceiling on ACS spend.
+     */
+    const perIp = await rateLimited(env.RATE_LIMITER, `track:${ip}`, TRACK_LIMIT, TRACK_WINDOW_MS)
+    if (perIp.limited || perIp.degraded) {
+      if (perIp.degraded) log.warn('Rate limiter unavailable; dropping tracking event')
+      return nothing()
+    }
+
+    const zone = await rateLimited(env.RATE_LIMITER, 'track:zone', ZONE_LIMIT, ZONE_WINDOW_MS)
+    if (zone.limited || zone.degraded) {
+      if (zone.degraded) log.warn('Rate limiter unavailable; dropping tracking event')
+      return nothing()
+    }
 
     const connectionString = env.COMMUNICATION_SERVICES_CONNECTION_STRING
     const sender = env.CONTACT_SENDER_ADDRESS
@@ -84,7 +143,7 @@ export async function handleTrack(request, env, ctx, log = console) {
      * after the 204 has already gone.
      */
     ctx?.waitUntil?.(
-      send({ connectionString, sender, recipient, ip, request, body }).catch((error) => {
+      send({ connectionString, sender, recipient, ip, request, body, event, section }).catch((error) => {
         log.error('Tracking email failed', error)
       }),
     )
@@ -96,16 +155,46 @@ export async function handleTrack(request, env, ctx, log = console) {
   return nothing()
 }
 
-async function send({ connectionString, sender, recipient, ip, request, body }) {
+/** Returns the value if it is allowed, the fallback if absent, null if not. */
+function pick(value, allowed, fallback) {
+  if (value === undefined || value === null || value === '') return fallback
+  if (typeof value !== 'string') return null
+  return allowed.has(value) ? value : null
+}
+
+/**
+ * True only for a request a browser on this site could have made.
+ *
+ * The origin must be present and must be this host over HTTPS. Development is
+ * the one exception, and it has to be asked for.
+ */
+function fromThisSite(request, env = {}) {
+  const origin = request.headers.get('origin')
+  if (!origin) return false
+
+  try {
+    const from = new URL(origin)
+    const host = request.headers.get('host') ?? new URL(request.url).host
+
+    if (from.protocol === 'https:' && from.host === host) return true
+
+    if (env.ALLOW_LOCALHOST_ORIGIN === 'true') {
+      return /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(from.host)
+    }
+
+    return false
+  } catch {
+    return false
+  }
+}
+
+async function send({ connectionString, sender, recipient, ip, request, body, event, section }) {
   const field = (name) => {
     const value = body[name]
     if (typeof value === 'string') return value.slice(0, FIELDS[name])
     if (typeof value === 'number') return String(value).slice(0, FIELDS[name])
     return ''
   }
-
-  const event = field('event') || 'visit'
-  const section = field('section')
 
   /*
    * Cloudflare's own view of where the request came from. The original mailed
@@ -142,4 +231,9 @@ async function send({ connectionString, sender, recipient, ip, request, body }) 
   return operation
 }
 
-export const TRACKING = { LIMIT: TRACK_LIMIT }
+export const TRACKING = {
+  LIMIT: TRACK_LIMIT,
+  WINDOW_MS: TRACK_WINDOW_MS,
+  ZONE_LIMIT,
+  ZONE_WINDOW_MS,
+}

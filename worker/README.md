@@ -106,10 +106,39 @@ stops arriving, and the Worker's logs.
 
 | | |
 |---|---|
-| Limit | 10 events per IP per hour, in its own bucket — browsing cannot spend the contact form's five |
-| Body | Capped at 32 KB; individual fields truncated before they reach the email |
+| Per sender | 10 events per IP per hour, in its own bucket — browsing cannot spend the contact form's five |
+| Across everyone | **100 events every 2 hours**, one bucket shared by the whole zone |
+| Origin | Required, and must be this host over HTTPS — stricter than the contact form, which allows callers with no `Origin` |
+| Fields | `event` and `section` are allowlisted; free text is truncated; body capped at 32 KB |
 | Send | Queued with `waitUntil` and not polled — nobody is waiting on the result, unlike the contact form |
 | Payload | Event, section, referrer, visitor id, visit count, first-seen date, plus the IP and Cloudflare's geo |
+
+### Two ceilings, and why
+
+A per-IP cap bounds one sender and nothing else. The route is reachable by
+anything that can make an HTTPS request, so a hundred addresses is a hundred
+times ten emails and the bill is real. The zone ceiling is the spend limit; the
+per-IP one just stops a single visitor using it all.
+
+The origin check is not authentication — anything can forge a header — but it
+stops the route being trivially scriptable, and the ceilings are what actually
+bound the damage.
+
+**Both ceilings fail closed.** If the limiter is unavailable, unreachable, or
+answers with something unreadable, the event is dropped. That is the opposite of
+what the contact form does with the same signal, and both are right: a message
+from a real person is worth more than an accurate count, while an optional
+beacon is worth less than the email it would cost. Failing open here would mean
+a limiter outage removed the only ceiling on ACS spend.
+
+A Cloudflare rate-limiting rule at the zone level is still worth adding in front
+of all this. It is enforced at the edge before the Worker runs, so unlike these
+it also costs nothing to serve.
+
+If the volume ever becomes a nuisance, the cheaper shape is to batch — one
+summary email per visit rather than one per event — or to track only `arrived`.
+Both are small changes; neither is done here because the ask was to restore what
+the original did.
 
 `faithful/src/modules/track.ts` is the other half: `sendBeacon` where available
 so the last event of a visit survives the page closing, `fetch(keepalive)`

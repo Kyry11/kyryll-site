@@ -78,10 +78,13 @@ function makeEnv(overrides = {}) {
 
 const EVENT = { event: 'section', section: 'about', visitor: 'v1', visits: 3, first: '2026-08-01' }
 
-function request({ body = EVENT, headers = {}, raw, method = 'POST' } = {}) {
+function request({ body = EVENT, headers = {}, raw, method = 'POST', noOrigin = false } = {}) {
+  // A browser on this site always sends an Origin; the route now requires it.
+  // noOrigin exists because spreading cannot remove a default.
+  const base = noOrigin ? {} : { origin: 'https://kyryll.com' }
   return new Request('https://kyryll.com/api/track', {
     method,
-    headers: { 'content-type': 'application/json', ...headers },
+    headers: { 'content-type': 'application/json', ...base, ...headers },
     body: method === 'POST' ? (raw === undefined ? JSON.stringify(body) : raw) : undefined,
   })
 }
@@ -159,10 +162,12 @@ test('tracking and the contact form do not share an allowance', async () => {
 
   for (let i = 0; i < 12; i++) await call(request({ headers }), env)
 
-  assert.deepEqual(
-    [...env.RATE_LIMITER._objects.keys()],
-    ['track:203.0.113.51'],
-    'tracking must key its own bucket',
+  const keys = [...env.RATE_LIMITER._objects.keys()]
+  assert.ok(keys.includes('track:203.0.113.51'), 'tracking must key its own per-IP bucket')
+  assert.ok(keys.includes('track:zone'), 'and consult the shared one')
+  assert.ok(
+    !keys.some((k) => k.startsWith('contact:')),
+    'and never touch the contact form\'s',
   )
 })
 
@@ -215,15 +220,142 @@ test('oversized beacons are dropped without being buffered', async () => {
   assert.equal(sent.length, 0)
 })
 
-test('long fields are truncated rather than mailed whole', async () => {
+test('long free-text fields are truncated rather than mailed whole', async () => {
+  // referrer and visitor are attacker-supplied strings with no allowlist to
+  // constrain them, so length is the only bound.
   await call(request({
-    body: { ...EVENT, referrer: 'r'.repeat(2000), section: 's'.repeat(2000) },
+    body: { ...EVENT, referrer: 'r'.repeat(4000), visitor: 'v'.repeat(4000) },
     headers: freshIp(),
   }))
 
   assert.equal(sent.length, 1)
   const text = sent[0].content.plainText
   assert.ok(text.length < 2000, `the email must not carry the raw field, got ${text.length}`)
+})
+
+test('only known events and sections are accepted', async () => {
+  // Both reach an email subject. Without an allowlist they are arbitrary
+  // strings chosen by whoever calls the route.
+  const rejected = [
+    { ...EVENT, event: 'anything' },
+    { ...EVENT, section: 'not-a-scene' },
+    { ...EVENT, event: '<script>' },
+    { ...EVENT, section: { nested: true } },
+    { ...EVENT, event: 42 },
+  ]
+
+  for (const body of rejected) {
+    sent = []
+    const res = await call(request({ body, headers: freshIp() }))
+    assert.equal(res.status, 204, JSON.stringify(body))
+    assert.equal(sent.length, 0, `must not send: ${JSON.stringify(body)}`)
+  }
+
+  for (const section of ['intro', 'about', 'work', 'contact']) {
+    sent = []
+    await call(request({ body: { ...EVENT, section }, headers: freshIp() }))
+    assert.equal(sent.length, 1, `must send: ${section}`)
+  }
+})
+
+test('the route is not callable without a browser origin', async () => {
+  // Not authentication — anything can forge a header — but it stops the route
+  // being trivially scriptable, and the ceilings are what bound the damage.
+  const rejected = [
+    ['no origin at all', {}, true],
+    ['plain http', { origin: 'http://kyryll.com' }, false],
+    ['another site', { origin: 'https://evil.test' }, false],
+    ['a lookalike host', { origin: 'https://kyryll.com.evil.test' }, false],
+  ]
+
+  for (const [label, headers, noOrigin] of rejected) {
+    sent = []
+    const res = await call(request({ headers: { ...freshIp(), ...headers }, noOrigin }))
+    assert.equal(res.status, 204, label)
+    assert.equal(sent.length, 0, `${label}: nothing sent`)
+  }
+})
+
+test('an unavailable rate limiter drops the event rather than letting it through', async () => {
+  /*
+   * The opposite call from the contact form, and deliberately so. A message
+   * from a real person is worth more than an accurate count; an optional beacon
+   * is worth less than the email it would cost. Failing open here would mean a
+   * limiter outage removed the only ceiling on ACS spend.
+   */
+  const broken = {
+    missing: undefined,
+    throwing: {
+      idFromName: (n) => n,
+      get: () => ({ fetch: async () => { throw new Error('DO unreachable') } }),
+    },
+    erroring: {
+      idFromName: (n) => n,
+      get: () => ({ fetch: async () => new Response('nope', { status: 500 }) }),
+    },
+    malformed: {
+      idFromName: (n) => n,
+      get: () => ({ fetch: async () => new Response('<html>not json</html>', { status: 200 }) }),
+    },
+  }
+
+  for (const [label, RATE_LIMITER] of Object.entries(broken)) {
+    sent = []
+    const res = await call(request({ headers: freshIp() }), makeEnv({ RATE_LIMITER }))
+    assert.equal(res.status, 204, label)
+    assert.equal(sent.length, 0, `${label}: a broken limiter must not become no limiter`)
+  }
+})
+
+test('each ceiling fails closed on its own, not because the other one caught it', async () => {
+  /*
+   * Breaking both at once proves nothing about either: whichever check runs
+   * second will stop the event regardless, so removing the first one's
+   * `degraded` test would not fail anything. Each is broken alone here so each
+   * is independently load-bearing.
+   */
+  const healthy = fakeNamespace()
+
+  const brokenFor = (badKey) => ({
+    idFromName: (n) => n,
+    get(id) {
+      if (id === badKey) {
+        return { fetch: async () => { throw new Error('DO unreachable') } }
+      }
+      return healthy.get(id)
+    },
+  })
+
+  for (const badKey of ['track:198.51.100.200', 'track:zone']) {
+    sent = []
+    const res = await call(
+      request({ headers: { 'cf-connecting-ip': '198.51.100.200' } }),
+      makeEnv({ RATE_LIMITER: brokenFor(badKey) }),
+    )
+    assert.equal(res.status, 204, badKey)
+    assert.equal(sent.length, 0, `a degraded ${badKey} alone must drop the event`)
+  }
+})
+
+test('a zone-wide ceiling bounds the total, not just each sender', async () => {
+  // A per-IP cap bounds one sender and nothing else: a hundred addresses is a
+  // hundred times ten emails, and the bill is real.
+  const env = makeEnv()
+
+  // Eleven addresses, each spending its own allowance of ten.
+  for (let ip = 0; ip < 11; ip++) {
+    for (let i = 0; i < 10; i++) {
+      await call(request({ headers: { 'cf-connecting-ip': `203.0.114.${ip}` } }), env)
+    }
+  }
+
+  assert.equal(TRACKING.ZONE_LIMIT, 100)
+  assert.equal(TRACKING.ZONE_WINDOW_MS, 2 * 60 * 60 * 1000)
+  assert.equal(sent.length, 100, `the zone ceiling must hold at 100, sent ${sent.length}`)
+  assert.ok(
+    [...env.RATE_LIMITER._objects.keys()].includes('track:zone'),
+    'and it must be one shared bucket',
+  )
 })
 
 test('the response carries the security headers and is never cached', async () => {
