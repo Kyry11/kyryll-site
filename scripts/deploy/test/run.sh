@@ -69,12 +69,52 @@ if [[ "$*" == *"storage account update"* ]]; then
   [ -n "${STUB_AZURE_VERIFY_FAIL:-}" ] && exit 1
   echo "registered"; exit 0
 fi
+if [[ "$*" == *"provider show"* ]]; then
+  echo "${STUB_PROVIDER_STATE:-Registered}"; exit 0
+fi
+if [[ "$*" == *"communication email domain show"* ]]; then
+  [ -n "${STUB_DOMAIN_MISSING:-}" ] && exit 1
+  if [[ "$*" == *"fromSenderDomain"* ]]; then echo "abc123.azurecomm.net"; else echo "/subscriptions/x/domains/AzureManagedDomain"; fi
+  exit 0
+fi
+if [[ "$*" == *"communication email show"* ]]; then
+  [ -n "${STUB_EMAIL_SVC_MISSING:-}" ] && exit 1
+  echo "exists"; exit 0
+fi
+if [[ "$*" == *"communication show"* ]]; then
+  [ -n "${STUB_COMMS_MISSING:-}" ] && exit 1
+  echo "exists"; exit 0
+fi
+if [[ "$*" == *"communication list-key"* ]]; then
+  [ -n "${STUB_NO_CONNECTION:-}" ] && { echo ""; exit 0; }
+  echo "endpoint=https://x.communication.azure.com/;accesskey=a2V5"; exit 0
+fi
+if [[ "$*" == *"communication email create"* || "$*" == *"communication email domain create"* || "$*" == *"communication create"* ]]; then
+  [ -n "${STUB_CREATE_FAIL:-}" ] && exit 1
+  echo "created"; exit 0
+fi
 exit 0
 STUBEOF
 
 cat > "$STUB/dig" <<'STUBEOF'
 #!/usr/bin/env bash
 echo "${STUB_DIG:-asverify.acct.blob.core.windows.net.}"
+STUBEOF
+
+cat > "$STUB/npx" <<'STUBEOF'
+#!/usr/bin/env bash
+# Only `wrangler secret list|put` is used by the deploy scripts.
+if [[ "$*" == *"secret list"* ]]; then
+  [ -n "${STUB_SECRET_LIST_FAIL:-}" ] && exit 1
+  echo "${STUB_EXISTING_SECRETS:-[]}"; exit 0
+fi
+if [[ "$*" == *"secret put"* ]]; then
+  cat >/dev/null
+  [ -n "${STUB_SECRET_PUT_FAIL:-}" ] && exit 1
+  [ -n "${STUB_SECRET_LOG:-}" ] && echo "${!#}" >> "$STUB_SECRET_LOG"
+  exit 0
+fi
+exit 0
 STUBEOF
 
 chmod +x "$STUB"/*
@@ -175,6 +215,46 @@ check "register survives a non-JSON body"            0 env STUB_CF_RAW='<html>50
 # The apex step is deliberately the opposite: it is not optional.
 check "point-apex still fails loudly on a bad body"  1 env STUB_CF_RAW='<html>502</html>' "$D/point-apex.sh"
 check "point-apex still fails on curl exiting"       1 env STUB_CURL_EXIT=7 "$D/point-apex.sh"
+
+echo "provision-email.sh  (never fatal: the site works without a contact form)"
+export CONTACT_RECIPIENT_ADDRESS=inbox@example.test
+SECRET_LOG="$STUB/secrets"; : > "$SECRET_LOG"
+
+check "provisions and sets all three secrets"        0 \
+  env STUB_SECRET_LOG="$SECRET_LOG" "$D/provision-email.sh"
+if [ "$(sort -u "$SECRET_LOG" | tr '\n' ' ')" = "COMMUNICATION_SERVICES_CONNECTION_STRING CONTACT_RECIPIENT_ADDRESS CONTACT_SENDER_ADDRESS " ]; then
+  printf '  ok    %s\n' "and set exactly the three the Worker reads"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (%s)\n' "and set exactly the three the Worker reads" "$(tr '\n' ' ' < "$SECRET_LOG")"; fail=$((fail + 1))
+fi
+
+# Rotation must stay an explicit act, not something a deploy does silently.
+: > "$SECRET_LOG"
+check "leaves existing secrets alone"                0 \
+  env STUB_SECRET_LOG="$SECRET_LOG" \
+      STUB_EXISTING_SECRETS='[{"name":"COMMUNICATION_SERVICES_CONNECTION_STRING"},{"name":"CONTACT_SENDER_ADDRESS"},{"name":"CONTACT_RECIPIENT_ADDRESS"}]' \
+      "$D/provision-email.sh"
+if [ ! -s "$SECRET_LOG" ]; then
+  printf '  ok    %s\n' "and overwrote nothing"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (%s)\n' "and overwrote nothing" "$(tr '\n' ' ' < "$SECRET_LOG")"; fail=$((fail + 1))
+fi
+
+# A failed read must not cause a working secret to be overwritten.
+: > "$SECRET_LOG"
+check "writes nothing when the secret list cannot be read" 0 \
+  env STUB_SECRET_LIST_FAIL=1 STUB_SECRET_LOG="$SECRET_LOG" "$D/provision-email.sh"
+
+check "skips when no recipient is configured"        0 env CONTACT_RECIPIENT_ADDRESS= "$D/provision-email.sh"
+check "skips when the provider is unregistered"      0 env STUB_PROVIDER_STATE=NotRegistered "$D/provision-email.sh"
+expect_output "and names the one-off command" "az provider register" \
+  env STUB_PROVIDER_STATE=NotRegistered "$D/provision-email.sh"
+check "creates the resources when absent"            0 \
+  env STUB_EMAIL_SVC_MISSING=1 STUB_COMMS_MISSING=1 "$D/provision-email.sh"
+check "warns, not fails, when a create is refused"   0 \
+  env STUB_EMAIL_SVC_MISSING=1 STUB_CREATE_FAIL=1 "$D/provision-email.sh"
+check "warns, not fails, with no connection string"  0 env STUB_NO_CONNECTION=1 "$D/provision-email.sh"
+check "warns, not fails, when a secret put is denied" 0 env STUB_SECRET_PUT_FAIL=1 "$D/provision-email.sh"
 
 echo
 printf '%s passed, %s failed\n' "$pass" "$fail"

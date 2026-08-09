@@ -133,8 +133,14 @@ that breaks both implementations at once still fails.
 
 ## Configuration
 
-Three secrets, set once. They persist on the Worker across deploys, so the
-deploy workflow never handles them:
+Three secrets. The deploy provisions the Azure resources and sets them on the
+first run — see `scripts/deploy/provision-email.sh` — so the only thing you have
+to supply is where the mail should land, as the `CONTACT_RECIPIENT_ADDRESS`
+repository secret. Without it the provisioning step says so and skips, and the
+endpoint keeps answering 500.
+
+It never overwrites a secret that already exists. Rotation is therefore an
+explicit act: delete the secret and redeploy. To set them by hand instead:
 
 ```bash
 npx wrangler secret put COMMUNICATION_SERVICES_CONNECTION_STRING
