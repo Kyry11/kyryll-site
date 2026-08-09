@@ -449,12 +449,41 @@ jobs:
           # escaping, keeping a URL out of any textual substitution.
           # The sender travels as a variable rather than a secret so it is
           # rewritten from Azure's actual linked domain on every deploy and
-          # cannot go stale. Omitted when provisioning did not run, so a partial
-          # setup does not publish an empty From address.
+          # cannot go stale.
+          #
+          # --keep-vars because wrangler deletes plain variables the deployment
+          # does not mention. Without it, a run where provisioning could not
+          # produce a sender — a transient Azure failure, an unreadable secret
+          # list — would deploy without CONTACT_SENDER_ADDRESS and remove the
+          # working one, turning a contact form that was fine into a 500 until
+          # some later deploy happened to succeed. A deploy should not delete
+          # configuration it merely failed to compute.
           if [ -n "${SENDER_ADDRESS:-}" ]; then
-            npx wrangler deploy --var "ORIGIN:$STORAGE_ENDPOINT" --var "CONTACT_SENDER_ADDRESS:$SENDER_ADDRESS"
+            npx wrangler deploy --keep-vars \
+              --var "ORIGIN:$STORAGE_ENDPOINT" \
+              --var "CONTACT_SENDER_ADDRESS:$SENDER_ADDRESS"
           else
-            npx wrangler deploy --var "ORIGIN:$STORAGE_ENDPOINT"
+            echo "::warning::No sender address was resolved; deploying without changing the existing one."
+            npx wrangler deploy --keep-vars --var "ORIGIN:$STORAGE_ENDPOINT"
+          fi
+
+      # Only now that the variable is live.
+      #
+      # `wrangler secret delete` publishes a new version immediately, so doing
+      # this during provisioning — before the upload, the prune and the deploy
+      # that carries the replacement — left the Worker with no sender at all for
+      # the length of those steps, and permanently if any of them failed. The
+      # secret shadows the variable until it goes, so the worst this ordering
+      # costs is one deploy still using the old address.
+      - name: Retire the shadowing sender secret
+        if: ${{ env.SENDER_SECRET_SHADOWS_VAR == 'true' && env.SENDER_ADDRESS != '' }}
+        working-directory: worker
+        run: |
+          set -uo pipefail
+          if npx wrangler secret delete CONTACT_SENDER_ADDRESS --force >/dev/null 2>&1; then
+            echo "CONTACT_SENDER_ADDRESS is a variable now; the shadowing secret has been removed."
+          else
+            echo "::warning::Could not remove the CONTACT_SENDER_ADDRESS secret. It shadows the variable, so the sender will stay on the old value until it is deleted."
           fi
 
       # The Worker's own responses are not cached by Cloudflare, but the

@@ -56,11 +56,15 @@ new_sqlite_classes = ["RateLimiter"]
 
 # Secrets, set with `wrangler secret put` — never here:
 #   COMMUNICATION_SERVICES_CONNECTION_STRING
-#   CONTACT_SENDER_ADDRESS
 #   CONTACT_RECIPIENT_ADDRESS
 #
 # The recipient is a secret too, deliberately. It is a real inbox and this
 # repository is public.
+#
+# CONTACT_SENDER_ADDRESS is deliberately *not* among them. It is published as a
+# variable by the deploy, derived from whatever domain Azure reports is linked,
+# so it cannot fall behind a change made outside the pipeline. Setting it as a
+# secret would shadow that variable and reintroduce exactly that failure.
 #
 # ALLOW_LOCALHOST_ORIGIN is deliberately absent. Setting it to "true" lets a
 # localhost page post to the contact endpoint, which is needed when Vite serves

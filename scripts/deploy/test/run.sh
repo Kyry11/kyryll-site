@@ -132,6 +132,7 @@ if [[ "$*" == *"communication email domain create"* && "$*" == *"CustomerManaged
   echo created; exit 0
 fi
 if [[ "$*" == *"communication update"* ]]; then
+  [ -n "${STUB_LINK_LOG:-}" ] && echo relink >> "$STUB_LINK_LOG"
   # STUB_LINK_APPLIED models the ambiguous case: the change lands server-side
   # and the CLI still reports failure.
   [ -n "${STUB_LINK_APPLIED:-}" ] && : > "${STUB_STATE:-/dev/null}"
@@ -140,9 +141,12 @@ if [[ "$*" == *"communication update"* ]]; then
   exit 0
 fi
 if [[ "$*" == *"resource show"* ]]; then
+  [ -n "${STUB_RESOURCE_READ_FAIL:-}" ] && exit 1
   echo "${STUB_LINKED_SENDER_DOMAIN:-previous.azurecomm.net}"; exit 0
 fi
 if [[ "$*" == *"sender-username list"* ]]; then
+  [ -n "${STUB_USERNAME_READ_FAIL:-}" ] && exit 1
+  [ -n "${STUB_NO_USERNAMES:-}" ] && { echo ""; exit 0; }
   echo "${STUB_SENDER_USERNAME:-DoNotReply}"; exit 0
 fi
 if [[ "$*" == *"communication list-key"* ]]; then
@@ -350,6 +354,72 @@ else
   printf '  FAIL  %s (%s)\n' "and never publishes one Azure has not authorised" "$(grep SENDER_ADDRESS "$SENDER_ENV" || echo none)"; fail=$((fail + 1))
 fi
 
+# A read that fails is not evidence that nothing is linked. Treating the two
+# alike meant a timed-out read could select the managed domain and then relink
+# the service to it, replacing a custom domain somebody had chosen.
+: > "$SENDER_ENV"
+LINK_LOG="$STUB/links"; : > "$LINK_LOG"
+check "stops when the linked-domain read fails"      0 \
+  env GITHUB_ENV="$SENDER_ENV" STUB_LINKED_READ_FAIL=1 STUB_LINK_LOG="$LINK_LOG" \
+      "$D/provision-email.sh"
+if [ ! -s "$SENDER_ENV" ] && [ ! -s "$LINK_LOG" ]; then
+  printf '  ok    %s\n' "and neither relinks nor republishes a sender"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (env=%s links=%s)\n' "and neither relinks nor republishes a sender" \
+    "$(tr '\n' ' ' < "$SENDER_ENV")" "$(tr '\n' ' ' < "$LINK_LOG")"; fail=$((fail + 1))
+fi
+
+: > "$SENDER_ENV"
+check "stops when the linked domain cannot be read"  0 \
+  env GITHUB_ENV="$SENDER_ENV" STUB_RESOURCE_READ_FAIL=1 "$D/provision-email.sh"
+if [ ! -s "$SENDER_ENV" ]; then
+  printf '  ok    %s\n' "and publishes no sender from a failed read"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (%s)\n' "and publishes no sender from a failed read" "$(tr '\n' ' ' < "$SENDER_ENV")"; fail=$((fail + 1))
+fi
+
+# An unreadable or empty username list is not evidence that `donotreply` works.
+: > "$SENDER_ENV"
+check "stops when the sender usernames cannot be read" 0 \
+  env GITHUB_ENV="$SENDER_ENV" STUB_USERNAME_READ_FAIL=1 "$D/provision-email.sh"
+if [ ! -s "$SENDER_ENV" ]; then
+  printf '  ok    %s\n' "and does not fall back to a guessed local part"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (%s)\n' "and does not fall back to a guessed local part" "$(tr '\n' ' ' < "$SENDER_ENV")"; fail=$((fail + 1))
+fi
+
+: > "$SENDER_ENV"
+check "stops when a custom domain has no sender registered" 0 \
+  env GITHUB_ENV="$SENDER_ENV" STUB_NO_USERNAMES=1 \
+      STUB_LINKED_DOMAIN=/subscriptions/x/domains/kyryll.com "$D/provision-email.sh"
+if [ ! -s "$SENDER_ENV" ]; then
+  printf '  ok    %s\n' "rather than publishing an address ACS would reject"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (%s)\n' "rather than publishing an address ACS would reject" "$(tr '\n' ' ' < "$SENDER_ENV")"; fail=$((fail + 1))
+fi
+
+# The managed domain is the one case where an empty list has a known default.
+: > "$SENDER_ENV"
+check "still uses donotreply on the managed domain"  0 \
+  env GITHUB_ENV="$SENDER_ENV" STUB_NO_USERNAMES=1 \
+      STUB_LINKED_DOMAIN=/subscriptions/x/domains/AzureManagedDomain "$D/provision-email.sh"
+if grep -q '^SENDER_ADDRESS=donotreply@' "$SENDER_ENV"; then
+  printf '  ok    %s\n' "where Azure creates it"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (%s)\n' "where Azure creates it" "$(tr '\n' ' ' < "$SENDER_ENV")"; fail=$((fail + 1))
+fi
+
+# The secret must outlive provisioning; the deploy that replaces it comes later.
+: > "$SENDER_ENV"; : > "$DELETE_LOG"
+check "flags the shadowing secret instead of deleting it" 0 \
+  env GITHUB_ENV="$SENDER_ENV" STUB_SECRET_DELETE_LOG="$DELETE_LOG" \
+      STUB_EXISTING_SECRETS='[{"name":"CONTACT_SENDER_ADDRESS"}]' "$D/provision-email.sh"
+if [ ! -s "$DELETE_LOG" ] && grep -q '^SENDER_SECRET_SHADOWS_VAR=true$' "$SENDER_ENV"; then
+  printf '  ok    %s\n' "and leaves removal to after the variable is deployed"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (deletes=%s)\n' "and leaves removal to after the variable is deployed" "$(tr '\n' ' ' < "$DELETE_LOG")"; fail=$((fail + 1))
+fi
+
 check "stops when nothing at all is linked"          0 \
   env STUB_NO_LINKED_DOMAIN=1 "$D/provision-email.sh"
 expect_output "and says the form cannot send" "cannot send" \
@@ -411,13 +481,6 @@ if grep -q '^SENDER_ADDRESS=DoNotReply@' "$SENDER_ENV"; then
 else
   printf '  FAIL  %s (%s)\n' "and takes the local part from Azure, not a guess" "$(tr '\n' ' ' < "$SENDER_ENV")"; fail=$((fail + 1))
 fi
-# A secret of the same name shadows the variable, so it has to go.
-if grep -q CONTACT_SENDER_ADDRESS "$DELETE_LOG"; then
-  printf '  ok    %s\n' "and removes a shadowing secret left by an older deploy"; pass=$((pass + 1))
-else
-  printf '  FAIL  %s\n' "and removes a shadowing secret left by an older deploy"; fail=$((fail + 1))
-fi
-
 : > "$DELETE_LOG"
 check "removes nothing when no such secret exists" 0 \
   env STUB_SECRET_DELETE_LOG="$DELETE_LOG" "$D/provision-email.sh"

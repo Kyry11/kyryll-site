@@ -243,6 +243,13 @@ deploy from whatever Azure reports is linked, including the local part, which is
 read from the domain's registered sender usernames rather than assumed to be
 `donotreply`.
 
+Every read behind that is fail-stop. A read that fails is not treated as
+evidence that nothing is linked, and an unreadable or empty list of sender
+usernames is not treated as evidence that `donotreply` is valid — in both cases
+the deploy leaves the existing configuration alone rather than publishing a
+guess. The deploy also passes `--keep-vars`, so a run that could not work the
+sender out does not delete the one that was working.
+
 `ORIGIN` is not a secret either, and is not known until the storage account exists,
 so `wrangler.toml` carries a placeholder and both the deploy and `npm run dev`
 pass the real value as `--var`. The rate limiter needs no id at all — a Durable

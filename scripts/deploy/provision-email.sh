@@ -74,13 +74,30 @@ if [ -z "$sender_domain" ]; then
   # The managed domain can be deleted on purpose once a custom one is working,
   # and recreating it here would undo that — and quietly move sending back to
   # an address nobody chose.
-  existing_link=$(az communication show --name "$COMMS_SERVICE" \
-    --resource-group "$AZURE_RESOURCE_GROUP" --query "linkedDomains" -o tsv 2>/dev/null | head -n1 || true)
+  # Only a *successful* empty answer means nothing is linked.
+  #
+  # Swallowing the failure with `|| true` made an unreadable answer look
+  # identical to an empty one, and the consequence was not cosmetic: the script
+  # would go on to select the managed domain and then relink the service to it,
+  # replacing a custom domain somebody had deliberately linked, because a read
+  # timed out.
+  existing_link=""
+  if az communication show --name "$COMMS_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP" >/dev/null 2>&1; then
+    if ! existing_link=$(az communication show --name "$COMMS_SERVICE" \
+        --resource-group "$AZURE_RESOURCE_GROUP" --query "linkedDomains" -o tsv 2>/dev/null); then
+      echo "::warning::Could not read the linked domains; leaving the sender configuration alone."
+      exit 0
+    fi
+    existing_link=$(printf '%s\n' "$existing_link" | head -n1)
+  fi
 
   if [ -n "$existing_link" ]; then
     domain_id="$existing_link"
-    sender_domain=$(az resource show --ids "$existing_link" \
-      --query "properties.fromSenderDomain" -o tsv 2>/dev/null || true)
+    if ! sender_domain=$(az resource show --ids "$existing_link" \
+        --query "properties.fromSenderDomain" -o tsv 2>/dev/null); then
+      echo "::warning::Could not read the linked domain; leaving the sender configuration alone."
+      exit 0
+    fi
     [ -n "$sender_domain" ] && echo "Using the already linked sender domain $sender_domain"
   fi
 fi
@@ -156,8 +173,11 @@ if ! az communication show --name "$COMMS_SERVICE" --resource-group "$AZURE_RESO
     --linked-domains "$domain_id" \
     --only-show-errors || { echo "::warning::Could not create $COMMS_SERVICE; skipping."; exit 0; }
 else
-  linked=$(az communication show --name "$COMMS_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP" \
-    --query "linkedDomains" -o tsv 2>/dev/null || true)
+  if ! linked=$(az communication show --name "$COMMS_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP" \
+      --query "linkedDomains" -o tsv 2>/dev/null); then
+    echo "::warning::Could not read the linked domains; not relinking."
+    exit 0
+  fi
 
   if ! printf '%s\n' "$linked" | grep -qxF -- "$domain_id"; then
     echo "Linking sender domain $sender_domain"
@@ -180,29 +200,50 @@ fi
 # It also fixes the failure that prompted all this: the linked domain changed in
 # the portal, the script saw the link already correct, concluded nothing had
 # changed, and left the Worker naming a domain that had been deleted.
-actual=$(az communication show --name "$COMMS_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP" \
-  --query "linkedDomains" -o tsv 2>/dev/null | head -n1 || true)
+if ! actual=$(az communication show --name "$COMMS_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP" \
+    --query "linkedDomains" -o tsv 2>/dev/null); then
+  echo "::warning::Could not confirm which domain is linked; leaving the sender configuration alone."
+  exit 0
+fi
+actual=$(printf '%s\n' "$actual" | head -n1)
 
 if [ -z "$actual" ]; then
   echo "::warning::No sender domain is linked to $COMMS_SERVICE; the contact form cannot send."
   exit 0
 fi
 
-actual_domain=$(az resource show --ids "$actual" \
-  --query "properties.fromSenderDomain" -o tsv 2>/dev/null || true)
+if ! actual_domain=$(az resource show --ids "$actual" \
+    --query "properties.fromSenderDomain" -o tsv 2>/dev/null); then
+  echo "::warning::Could not read the linked domain's sender address; leaving the sender configuration alone."
+  exit 0
+fi
 
 # The local part comes from Azure too, rather than being assumed. This was
 # hardcoded `donotreply@`, which is what the managed domain happens to use; a
 # custom domain's sender usernames are whatever you registered, and on
 # kyryll.com that is `DoNotReply`. A mismatch is rejected at send time with
 # nothing on the site to say why.
-actual_user=$(az communication email domain sender-username list \
-  --domain-name "$(basename "$actual")" \
-  --email-service-name "$EMAIL_SERVICE" \
-  --resource-group "$AZURE_RESOURCE_GROUP" \
-  --query "[0].username" -o tsv 2>/dev/null || true)
+if ! actual_user=$(az communication email domain sender-username list \
+    --domain-name "$(basename "$actual")" \
+    --email-service-name "$EMAIL_SERVICE" \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --query "[0].username" -o tsv 2>/dev/null); then
+  echo "::warning::Could not read the sender usernames for $(basename "$actual"); leaving the sender configuration alone."
+  exit 0
+fi
 
-[ -n "$actual_user" ] || actual_user=donotreply
+if [ -z "$actual_user" ]; then
+  # An empty list is only evidence of a default on the managed domain, where
+  # `donotreply` is the one Azure creates. On a domain you registered yourself
+  # an empty list means no sender exists, and guessing publishes an address ACS
+  # will reject — which is the failure this whole change is about.
+  if [ "$(basename "$actual")" = "AzureManagedDomain" ]; then
+    actual_user=donotreply
+  else
+    echo "::warning::No sender usernames are registered on $(basename "$actual"); leaving the sender configuration alone."
+    exit 0
+  fi
+fi
 
 if [ -z "$actual_domain" ]; then
   echo "::warning::Could not read the linked domain's sender address; the contact form may not send."
@@ -239,14 +280,16 @@ put_secret CONTACT_RECIPIENT_ADDRESS "$CONTACT_RECIPIENT_ADDRESS"
 # it cannot drift, whoever moved it.
 echo "SENDER_ADDRESS=$SENDER_ADDRESS" >> "${GITHUB_ENV:-/dev/null}"
 
-# A secret of the same name would shadow the variable, so an older deploy's
-# secret is removed — but only once there is a variable to replace it.
+# A secret of the same name shadows the variable, so one left by an older deploy
+# has to go — but not here.
+#
+# `wrangler secret delete` publishes a new version of the Worker immediately,
+# and the variable that replaces it is not deployed until several steps later.
+# Removing it now would leave the Worker with no sender at all for the length of
+# the upload and prune, and permanently if any of those failed. Flagged instead,
+# and removed after the deploy that carries the variable.
 if printf '%s\n' "$existing" | grep -qx -- CONTACT_SENDER_ADDRESS; then
-  if (cd worker && npx wrangler secret delete CONTACT_SENDER_ADDRESS --force >/dev/null 2>&1); then
-    echo "  CONTACT_SENDER_ADDRESS is now a variable; the old secret was removed"
-  else
-    echo "::warning::Could not remove the CONTACT_SENDER_ADDRESS secret. It shadows the variable, so the sender may stay stale."
-  fi
+  echo "SENDER_SECRET_SHADOWS_VAR=true" >> "${GITHUB_ENV:-/dev/null}"
 fi
 
 # Only claim success when it is true. A run that failed to write a secret leaves
