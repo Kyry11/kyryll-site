@@ -12,6 +12,27 @@ set -euo pipefail
 : "${ZONE_NAME:?required}"
 : "${STORAGE_WEB_HOST:?required}"
 
+# Say plainly whether the fallback this record exists for actually works.
+#
+# The record is repointed either way — an account with a pending registration is
+# a better target than a legacy one, and it starts working the moment
+# registration succeeds. But a fallback that resolves to an account which
+# answers 400 to `Host: $ZONE_NAME` is worse than no fallback if nobody knows,
+# so it is stated rather than left to be discovered during an incident.
+if [ -n "${AZURE_STORAGE_ACCOUNT:-}" ] && [ -n "${AZURE_RESOURCE_GROUP:-}" ]; then
+  registered=$(az storage account show \
+    --name "$AZURE_STORAGE_ACCOUNT" \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --query "customDomain.name" -o tsv 2>/dev/null || true)
+  registered=$(printf '%s' "$registered" | tr '[:upper:]' '[:lower:]' | sed 's/\.$//')
+
+  if [ "$registered" = "$ZONE_NAME" ]; then
+    echo "Fallback is live: $AZURE_STORAGE_ACCOUNT answers to Host: $ZONE_NAME."
+  else
+    echo "::warning::$AZURE_STORAGE_ACCOUNT does not have $ZONE_NAME registered as a custom domain, so the apex record is NOT a working fallback yet — storage will answer 400 to Host: $ZONE_NAME. The site is unaffected while the Worker route is active."
+  fi
+fi
+
 records=$(cf -G "$CF_API/zones/$CLOUDFLARE_ZONE_ID/dns_records" --data-urlencode "name=$ZONE_NAME")
 if ! cf_ok "$records"; then
   echo "::error::Could not list DNS records. The token needs Zone > DNS > Edit."

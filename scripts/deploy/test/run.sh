@@ -134,6 +134,12 @@ check "refuses to touch A/AAAA records"              0 env STUB_APEX=a     "$D/p
 expect_output "and says so" "Not touching them" env STUB_APEX=a "$D/point-apex.sh"
 check "fails if the record ends up unproxied"        1 env STUB_APEX=cname STUB_CF_PROXIED=false "$D/point-apex.sh"
 check "fails if the DNS write is denied"             1 env STUB_APEX=cname STUB_CF_WRITE_FAIL=1  "$D/point-apex.sh"
+# The record is repointed either way, but a fallback that is not actually
+# functional must say so rather than be discovered during an incident.
+expect_output "reports the fallback live when the domain is registered" "Fallback is live" \
+  env STUB_APEX=cname STUB_CURRENT_DOMAIN=kyryll.com "$D/point-apex.sh"
+expect_output "warns when the domain is not registered on this account" "NOT a working fallback" \
+  env STUB_APEX=cname STUB_CURRENT_DOMAIN= "$D/point-apex.sh"
 
 echo "remove-asverify.sh"
 check "removes the record"                           0 env ASVERIFY_NAME=asverify.kyryll.com "$D/remove-asverify.sh"
