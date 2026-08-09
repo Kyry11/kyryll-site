@@ -134,6 +134,7 @@ Five GitHub encrypted secrets:
 | `AZURE_STORAGE_ACCOUNT` | Storage account name |
 | `CLOUDFLARE_API_TOKEN` | See the scopes below |
 | `CLOUDFLARE_ACCOUNT_ID` | Required by wrangler |
+| `CONTACT_RECIPIENT_ADDRESS` | Optional. Where contact-form mail lands; without it the form stays unprovisioned and answers 500 |
 
 `AZURE_LOCATION` is optional and defaults to `australiaeast`.
 `CLOUDFLARE_ZONE_ID` is optional; without it the cache is not purged and a
@@ -213,9 +214,18 @@ on the fallback, so losing it is not a reason to stop shipping. The apex step
 logs whether the fallback is actually live, so a half-configured state says so
 rather than waiting to be discovered during an incident.
 
-The contact form additionally needs three Worker secrets, set once with
-`wrangler secret put` so the workflow never handles them. See
-[worker/README.md](worker/README.md).
+The contact form's Azure Communication Services resources are provisioned by the
+deploy into the same resource group as the storage account, and its three Worker
+secrets are set on the first run. Only `CONTACT_RECIPIENT_ADDRESS` has to be
+supplied. One prerequisite cannot be automated: `Microsoft.Communication` must
+be registered on the subscription, which is a subscription-level action the
+deploy identity does not have rights for. Run once, as an owner:
+
+```bash
+az provider register --namespace Microsoft.Communication --wait
+```
+
+See [worker/README.md](worker/README.md).
 
 ## Security note
 

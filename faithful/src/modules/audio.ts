@@ -28,9 +28,25 @@
  * gesture has already happened long before the music is due.
  */
 
-import { isNarrow } from './dom'
+import { isNarrow, prefersReducedMotion } from './dom'
 
 const FIREWORK_MS = 1900
+
+/*
+ * When each stab fires, relative to the display starting. The original's
+ * timings, unchanged.
+ */
+const STAB_DELAYS = [0, 1000, 1300, 1800] as const
+
+/*
+ * Louder than the bed, because the sprite is quieter than the music.
+ *
+ * The stabs play the track's first 1.9 s — that is what Howler's
+ * `firework: [0, 1900]` sprite was. Measured, that opening averages -21.2 dBFS
+ * against -13.1 for the body of the track, and it decays to -31 dB by 1.75 s.
+ * At the bed's own 0.55 it is barely there.
+ */
+const STAB_VOLUME = 0.7
 
 /*
  * Deliberately not the key the earlier build used ('kyryll:sound'). That one
@@ -68,6 +84,42 @@ export function createAudio(): Audio {
   let playing = false
   let wantsTrack = false
   let armed = false
+
+  /*
+   * One element per stab, built and buffered during the cold open.
+   *
+   * Both halves of that matter, and the previous arrangement got both wrong.
+   * It created a single element at the moment the display started and replayed
+   * it by resetting currentTime, which meant the four stabs interrupted each
+   * other instead of layering — and, worse, the element never buffered: live,
+   * the first stab fired at readyState 0 and the rest at 1, so play() resolved
+   * (playback *began*) while there was no decoded audio to emit. Restarting it
+   * every 300 ms is what stopped it ever getting any. Nothing was audible.
+   *
+   * Separate elements can overlap, which is what Howler did with a sprite, and
+   * loading them alongside the bed gives them the whole cold open to buffer.
+   * They share one URL, so the browser fetches it once and serves the rest from
+   * cache.
+   */
+  const stabs: HTMLAudioElement[] = []
+
+  /**
+   * Hands a stab's buffer back. Safe to call twice.
+   *
+   * Defined out here rather than inside playFireworkStabs() because muting has
+   * to reach them too, and because the display is not the only thing that
+   * decides they are finished with.
+   */
+  const releaseStab = (stab: HTMLAudioElement): void => {
+    stab.pause()
+    stab.removeAttribute('src')
+    stab.load()
+  }
+
+  const releaseAllStabs = (): void => {
+    for (const stab of stabs) releaseStab(stab)
+    stabs.length = 0
+  }
 
   /*
    * The control reflects *intent*, not whether audio happens to be coming out
@@ -130,6 +182,22 @@ export function createAudio(): Audio {
       // that it must not start later either.
       bed.pause()
       playing = false
+
+      /*
+       * And the stabs, which pausing the bed does not touch.
+       *
+       * A stab already past play() went on sounding for up to 1.9 s after the
+       * control said the sound was off — future ones were suppressed, but the
+       * one you could hear was not, which is the only one that matters to
+       * somebody pressing mute. Releasing rather than pausing is deliberate:
+       * it silences what is playing and gives back four buffered copies of a
+       * five-minute track at the same time.
+       *
+       * It is one-way. Un-muting during the ~13 s before the display gets the
+       * track but not the stabs, which is a fair trade for not holding the
+       * memory of somebody who asked for silence.
+       */
+      releaseAllStabs()
     } else {
       // Deliberately does not set `wantsTrack`. Un-muting says "let me hear
       // it", not "skip the cue" — if the display is still running, the track
@@ -201,40 +269,65 @@ export function createAudio(): Audio {
       } catch {
         // Nothing to do — playback will simply buffer later instead.
       }
+
+      /*
+       * Not under reduced motion. There is no firework display on that path, so
+       * playFireworkStabs() is never called — and it holds the only cleanup, so
+       * four buffered copies of the track stayed attached for the life of the
+       * page for exactly the visitors who asked for less. The bed is still
+       * primed: a motion preference says nothing about sound.
+       */
+      if (prefersReducedMotion()) return
+
+      for (const _ of STAB_DELAYS) {
+        const stab = new window.Audio()
+        stab.src = bed.src
+        stab.volume = STAB_VOLUME
+        stab.preload = 'auto'
+        try {
+          stab.load()
+        } catch {
+          // As above.
+        }
+        stabs.push(stab)
+      }
     },
 
     playFireworkStabs(): void {
-      if (muted) return
-
       /*
-       * One element, reused. The original played a Howler sprite off a single
-       * decoded buffer; constructing four `Audio(bed.src)` instead pulled the
-       * whole 3.6 MB track down again for each 1.9 s stab, and `pause()` alone
-       * never released them.
+       * Releasing is unconditional, and that is the point.
        *
-       * Reusing one element means the stabs cannot overlap — at 1000/1300/1800
-       * ms against a 1900 ms tail they would have anyway, so this also stops
-       * three copies of the same opening bar playing over each other.
+       * Each of these holds a buffered copy of a five-minute track, loaded
+       * during the cold open so it is ready on cue. Both mute paths used to
+       * return without releasing anything — muted before the display, and muted
+       * during it — so a visitor who turned the sound off kept four of them
+       * attached for the life of the page. The one path that did release was
+       * the one where they had already played.
        */
-      const stab = new window.Audio(bed.src)
-      stab.volume = 0.4
-      stab.preload = 'auto'
-
-      for (const delay of [0, 1000, 1300, 1800]) {
-        setTimeout(() => {
-          if (muted) return
-          stab.currentTime = 0
-          void stab.play().catch(() => undefined)
-        }, delay)
+      if (muted) {
+        releaseAllStabs()
+        return
       }
 
-      setTimeout(() => {
-        stab.pause()
-        // Drop the buffer rather than leaving a decoded copy of the track
-        // parked for the life of the page.
-        stab.removeAttribute('src')
-        stab.load()
-      }, 1800 + FIREWORK_MS)
+      STAB_DELAYS.forEach((delay, i) => {
+        const stab = stabs[i]
+        if (!stab) return
+
+        setTimeout(() => {
+          // Muted between priming and this stab's turn: nothing to play, but
+          // still something to give back.
+          if (muted) {
+            releaseStab(stab)
+            return
+          }
+
+          // No currentTime reset: each element is played once, from its own
+          // start. Resetting is what made these interrupt one another.
+          void stab.play().catch(() => undefined)
+
+          setTimeout(() => releaseStab(stab), FIREWORK_MS)
+        }, delay)
+      })
     },
 
     startTrack(): void {

@@ -145,6 +145,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CONTACT_RECIPIENT_ADDRESS: ${{ secrets.CONTACT_RECIPIENT_ADDRESS }}
       SITE_DIST: faithful/dist
 
     steps:
@@ -296,6 +297,13 @@ jobs:
       - name: Point the apex record at the storage account
         if: ${{ env.CLOUDFLARE_ZONE_ID != '' && env.ZONE_NAME != '' }}
         run: scripts/deploy/point-apex.sh
+
+      # The contact form's Azure resources, in the same resource group as the
+      # storage account. Idempotent, so this is a no-op after the first deploy,
+      # and never fatal — the site serves perfectly well without a working
+      # contact form, and this runs before the upload and the Worker deploy.
+      - name: Provision the contact form
+        run: scripts/deploy/provision-email.sh
 
       - name: Upload the build to $web
         run: |
