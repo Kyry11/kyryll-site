@@ -50,7 +50,14 @@ export class RateLimiter {
   }
 
   async fetch(request) {
-    const { now } = await request.json()
+    // The limit travels with the request rather than being baked in, because
+    // two routes want different ones: five submissions an hour for the contact
+    // form, ten events for tracking. The caller is this Worker, so there is
+    // nothing to validate — a visitor cannot reach the object directly.
+    // Limit and window both travel with the request. Three callers want three
+    // different pairs: five an hour per IP for the contact form, ten an hour
+    // per IP for tracking, and one hundred every two hours across everyone.
+    const { now, limit, window } = await request.json()
 
     /*
      * Each evaluation waits for the previous one, explicitly.
@@ -65,19 +72,19 @@ export class RateLimiter {
      * construction; this holds under a fake that does not.
      */
     const evaluation = this.tail.then(
-      () => this.evaluate(now),
-      () => this.evaluate(now),
+      () => this.evaluate(now, limit, window),
+      () => this.evaluate(now, limit, window),
     )
     this.tail = evaluation.catch(() => {})
 
     return Response.json(await evaluation)
   }
 
-  async evaluate(now) {
+  async evaluate(now, limit = MAX_IN_WINDOW, windowMs = WINDOW_MS) {
     const times = (await this.state.storage.get('times')) ?? []
-    const live = times.filter((t) => now - t < WINDOW_MS)
+    const live = times.filter((t) => now - t < windowMs)
 
-    if (live.length >= MAX_IN_WINDOW) {
+    if (live.length >= limit) {
       /*
        * Deliberately no write on the refusal path. Rewriting the entry on every
        * rejected attempt would let someone hold their own bucket alive
@@ -95,7 +102,7 @@ export class RateLimiter {
      * write, which is what makes it track the newest entry rather than the
      * oldest.
      */
-    await this.state.storage.setAlarm(now + WINDOW_MS + 60_000)
+    await this.state.storage.setAlarm(now + windowMs + 60_000)
 
     return { limited: false }
   }
@@ -108,26 +115,60 @@ export class RateLimiter {
 /**
  * Records an attempt and reports whether it should be refused.
  *
+ * The key is namespaced by the caller — `contact:<ip>`, `track:<ip>` — so the
+ * two routes count separately. Sharing one bucket would let a visitor browsing
+ * the site spend the allowance the contact form needs.
+ *
  * @param {DurableObjectNamespace | undefined} namespace
- * @param {string} ip
+ * @param {string} key
+ * `degraded` says the answer is not trustworthy — no binding, an unreachable
+ * object, an unreadable reply. What to do about that is the caller's decision
+ * and the two callers here make opposite ones: the contact form lets a message
+ * through, because refusing everybody over a broken counter is worse than
+ * miscounting; tracking drops the event, because it is optional and every one
+ * that gets past costs an email.
+ *
+ * @param {number} limit
+ * @param {number} windowMs
  * @param {number} now
  * @returns {Promise<{ limited: boolean, degraded: boolean }>}
  */
-export async function rateLimited(namespace, ip, now = Date.now()) {
+export async function rateLimited(namespace, key, limit = MAX_IN_WINDOW, windowMs = WINDOW_MS, now = Date.now()) {
   // No binding at all — a test that does not care, or a misconfigured deploy.
   if (!namespace) return { limited: false, degraded: true }
 
   try {
-    const stub = namespace.get(namespace.idFromName(ip))
+    const stub = namespace.get(namespace.idFromName(key))
     const response = await stub.fetch('https://limiter/check', {
       method: 'POST',
-      body: JSON.stringify({ now }),
+      body: JSON.stringify({ now, limit, window: windowMs }),
     })
 
     if (!response.ok) return { limited: false, degraded: true }
 
-    const { limited } = await response.json()
-    return { limited: Boolean(limited), degraded: false }
+    const payload = await response.json()
+
+    /*
+     * The shape is checked, not coerced.
+     *
+     * `Boolean(payload.limited)` turned a 200 carrying `{}` into
+     * `{ limited: false, degraded: false }` — not merely wrong but confidently
+     * wrong, since `degraded` is the flag callers use to decide whether the
+     * answer can be trusted at all. A response that does not say what it means
+     * is exactly the case the flag exists for, so anything without a real
+     * boolean is reported as degraded and left to the caller: the contact form
+     * lets the message through, tracking drops the event.
+     */
+    if (
+      payload === null ||
+      typeof payload !== 'object' ||
+      Array.isArray(payload) ||
+      typeof payload.limited !== 'boolean'
+    ) {
+      return { limited: false, degraded: true }
+    }
+
+    return { limited: payload.limited, degraded: false }
   } catch {
     return { limited: false, degraded: true }
   }

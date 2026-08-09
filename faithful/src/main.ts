@@ -32,6 +32,7 @@ import { setupNav } from './modules/nav'
 import { setupCarousel } from './modules/carousel'
 import { setupContactForm } from './modules/contact'
 import { createAudio } from './modules/audio'
+import { setupTracking } from './modules/track'
 import { fadeIn, prefersReducedMotion, wait } from './modules/dom'
 
 const content = document.getElementById('content')
@@ -109,6 +110,13 @@ async function revealMainContent(audio: ReturnType<typeof createAudio>): Promise
    * second time. See prepareNav().
    */
   prepareNav()
+
+  /*
+   * Tracking starts once the site is actually on screen, not at boot. Somebody
+   * who closes the tab during the cold open never arrived, and the original
+   * counted arrivals rather than requests.
+   */
+  setupTracking()
 
   container.hidden = false
   // Force a reflow so the transition has a start value to animate from.

@@ -146,3 +146,42 @@ test('rateLimited keys one object per IP', async () => {
 
   assert.deepEqual(seen, ['203.0.113.1', '203.0.113.2'])
 })
+
+test('a reply that does not say what it means is degraded, not permission', async () => {
+  /*
+   * `Boolean(payload.limited)` used to turn a 200 carrying `{}` into
+   * `{ limited: false, degraded: false }` — confidently wrong, because
+   * `degraded` is the flag callers use to decide whether to trust the answer at
+   * all. Tracking fails closed on it, so coercing it away silently removed a
+   * ceiling.
+   */
+  const answering = (body) => ({
+    idFromName: (name) => name,
+    get: () => ({ fetch: async () => new Response(JSON.stringify(body), { status: 200 }) }),
+  })
+
+  const nonsense = [
+    ['an empty object', {}],
+    ['null', null],
+    ['an array', []],
+    ['a bare string', 'limited'],
+    ['a number', 7],
+    ['limited as a string', { limited: 'true' }],
+    ['limited as a number', { limited: 1 }],
+    ['limited absent but degraded present', { degraded: false }],
+  ]
+
+  for (const [label, body] of nonsense) {
+    assert.deepEqual(
+      await rateLimited(answering(body), '203.0.113.1'),
+      { limited: false, degraded: true },
+      label,
+    )
+  }
+
+  // A real boolean either way is trusted.
+  assert.deepEqual(await rateLimited(answering({ limited: false }), '203.0.113.1'),
+    { limited: false, degraded: false })
+  assert.deepEqual(await rateLimited(answering({ limited: true }), '203.0.113.1'),
+    { limited: true, degraded: false })
+})

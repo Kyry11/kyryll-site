@@ -257,7 +257,9 @@ test('CF-Connecting-IP wins over a client-supplied X-Forwarded-For', async () =>
     )
   }
 
-  assert.deepEqual([...env.RATE_LIMITER._objects.keys()], ['203.0.113.9'])
+  // Namespaced per route, so browsing the site cannot spend the contact
+  // form's allowance.
+  assert.deepEqual([...env.RATE_LIMITER._objects.keys()], ['contact:203.0.113.9'])
 })
 
 test('an unavailable rate-limit store fails open rather than refusing everyone', async () => {
@@ -408,7 +410,7 @@ test('the rightmost X-Forwarded-For hop is the bucket key', async () => {
   const env = makeEnv()
   await call(request({ headers: { 'x-forwarded-for': '10.0.0.1, 203.0.113.7' } }), env)
 
-  assert.deepEqual([...env.RATE_LIMITER._objects.keys()], ['203.0.113.7'])
+  assert.deepEqual([...env.RATE_LIMITER._objects.keys()], ['contact:203.0.113.7'])
 })
 
 test('the send and poll are addressed with a pinned api-version', async () => {

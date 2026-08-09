@@ -9,6 +9,8 @@ src/index.js      routing
 src/static.js     serving the build out of blob storage
 src/http.js       security headers, JSON responses
 src/contact.js    POST /api/contact
+src/track.js      POST /api/track
+src/request.js    guards shared by both endpoints
 src/acs.js        Azure Communication Services, over REST
 src/ratelimit.js  rate limiting, in a Durable Object
 ```
@@ -85,6 +87,70 @@ fills it is silently discarded with a 200.
 | 429 | Rate limit tripped: more than 5 submissions from one IP in an hour. See below. |
 | 500 | Email is not configured — see Configuration |
 | 502 | The send reached a terminal state other than Succeeded, or ACS rejected it outright |
+
+## `POST /api/track`
+
+The 2012 site's visit tracking, restored. The original called an endpoint on
+every section change and emailed the result — visitor id, visit count, date of
+first visit — and this does the same, on a route of its own.
+
+**It answers 204 to everything.** Recorded, rate limited, malformed,
+cross-origin, unconfigured, broken: one response. That is deliberate. A limiter
+that answers 429 tells whoever hit it exactly where the ceiling is and how to
+pace themselves beneath it; one that never varies cannot be measured from
+outside.
+
+The cost of that is worth stating plainly: **this endpoint is unobservable when
+it breaks.** Nothing on the site will look wrong. The only evidence is mail that
+stops arriving, and the Worker's logs.
+
+| | |
+|---|---|
+| Per sender | 10 events per IP per hour, in its own bucket — browsing cannot spend the contact form's five |
+| Across everyone | **100 events every 2 hours**, one bucket shared by the whole zone |
+| Origin | Required, and must be this host over HTTPS — stricter than the contact form, which allows callers with no `Origin` |
+| Fields | `event` and `section` are allowlisted; free text is truncated; body capped at 32 KB |
+| Send | Queued with `waitUntil` and not polled — nobody is waiting on the result, unlike the contact form |
+| Payload | Event, section, referrer, visitor id, visit count, first-seen date, plus the IP and Cloudflare's geo |
+
+### Two ceilings, and why
+
+A per-IP cap bounds one sender and nothing else. The route is reachable by
+anything that can make an HTTPS request, so a hundred addresses is a hundred
+times ten emails and the bill is real. The zone ceiling is the spend limit; the
+per-IP one just stops a single visitor using it all.
+
+The origin check is not authentication — anything can forge a header — but it
+stops the route being trivially scriptable, and the ceilings are what actually
+bound the damage.
+
+**Both ceilings fail closed.** If the limiter is unavailable, unreachable, or
+answers with anything other than a real boolean — unreadable, or valid JSON that
+simply does not say — the event is dropped. That is the opposite of
+what the contact form does with the same signal, and both are right: a message
+from a real person is worth more than an accurate count, while an optional
+beacon is worth less than the email it would cost. Failing open here would mean
+a limiter outage removed the only ceiling on ACS spend.
+
+A Cloudflare rate-limiting rule at the zone level is still worth adding in front
+of all this. It is enforced at the edge before the Worker runs, so unlike these
+it also costs nothing to serve.
+
+If the volume ever becomes a nuisance, the cheaper shape is to batch — one
+summary email per visit rather than one per event — or to track only `arrived`.
+Both are small changes; neither is done here because the ask was to restore what
+the original did.
+
+`faithful/src/modules/track.ts` is the other half: `sendBeacon` where available
+so the last event of a visit survives the page closing, `fetch(keepalive)`
+otherwise, everything fire-and-forget and every path wrapped, because it is the
+least important code on the page and shares a thread with everything that
+matters.
+
+**One thing this does not do is ask.** It records IP addresses and browsing
+behaviour, which is personal data; for EU visitors GDPR and ePrivacy apply, and
+there is no notice or consent anywhere on the site. That is a decision to make
+deliberately rather than one to inherit from 2012.
 
 ## Rate limiting
 
