@@ -69,6 +69,23 @@ fi
 # it the right fallback: a custom sender cannot send until its SPF and DKIM are
 # verified, and until then there still has to be a working sender.
 if [ -z "$sender_domain" ]; then
+  # If something is already linked, use that rather than creating anything.
+  #
+  # The managed domain can be deleted on purpose once a custom one is working,
+  # and recreating it here would undo that — and quietly move sending back to
+  # an address nobody chose.
+  existing_link=$(az communication show --name "$COMMS_SERVICE" \
+    --resource-group "$AZURE_RESOURCE_GROUP" --query "linkedDomains" -o tsv 2>/dev/null | head -n1 || true)
+
+  if [ -n "$existing_link" ]; then
+    domain_id="$existing_link"
+    sender_domain=$(az resource show --ids "$existing_link" \
+      --query "properties.fromSenderDomain" -o tsv 2>/dev/null || true)
+    [ -n "$sender_domain" ] && echo "Using the already linked sender domain $sender_domain"
+  fi
+fi
+
+if [ -z "$sender_domain" ]; then
   if ! az communication email domain show --domain-name AzureManagedDomain \
         --email-service-name "$EMAIL_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP" >/dev/null 2>&1; then
     echo "Creating the Azure-managed sender domain"
@@ -98,6 +115,7 @@ if [ -z "$domain_id" ] || [ -z "$sender_domain" ]; then
   echo "::warning::Could not resolve a sender domain; skipping contact-form provisioning."
   exit 0
 fi
+
 
 # The secret list is read here, before anything is linked, because the sender
 # secret has to be written *before* the link — see below.
@@ -137,84 +155,62 @@ if ! az communication show --name "$COMMS_SERVICE" --resource-group "$AZURE_RESO
     --data-location "$DATA_LOCATION" \
     --linked-domains "$domain_id" \
     --only-show-errors || { echo "::warning::Could not create $COMMS_SERVICE; skipping."; exit 0; }
-  put_secret CONTACT_SENDER_ADDRESS "donotreply@$sender_domain" true || true
 else
-  # Moving between the managed domain and a custom one changes which address is
-  # allowed to send. Read what is linked rather than assuming, because the
-  # sender secret has to follow it and a secret cannot be read back.
-  # This read must succeed. Swallowing a failure into an empty string made the
-  # domain look unlinked, so the script would try to link and then have nothing
-  # to roll back to.
-  if ! linked=$(az communication show --name "$COMMS_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP" \
-      --query "linkedDomains" -o tsv 2>/dev/null); then
-    echo "::warning::Could not read the linked domains; leaving the sender configuration alone."
-    exit 0
-  fi
+  linked=$(az communication show --name "$COMMS_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP" \
+    --query "linkedDomains" -o tsv 2>/dev/null || true)
 
   if ! printf '%s\n' "$linked" | grep -qxF -- "$domain_id"; then
-    # Secret first, link second, and the link is gated on the write.
-    #
-    # The other order is a trap. Link, then fail to write the secret, and Azure
-    # is on the new domain while the Worker still names the old one — and the
-    # next deploy sees the link already correct, decides nothing changed, and
-    # leaves the stale secret alone for ever. Sending stays broken with nothing
-    # reporting why.
-    #
-    # This way a failed write leaves both sides on the old domain, consistent
-    # and working, and the next deploy tries the whole thing again.
     echo "Linking sender domain $sender_domain"
-    if ! put_secret CONTACT_SENDER_ADDRESS "donotreply@$sender_domain" true; then
-      echo "::warning::Not linking $sender_domain, since the Worker could not be told about it. Both sides stay on the current domain; the next deploy will retry."
-      exit 0
-    fi
-
-    update_reported_failure=false
     az communication update --name "$COMMS_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP" \
-      --linked-domains "$domain_id" --only-show-errors >/dev/null 2>&1 || update_reported_failure=true
-
-    # Re-read rather than believe the exit code.
-    #
-    # A non-zero az is not proof the change did not happen: the request can
-    # succeed server-side and the CLI still fail while receiving the response.
-    # Rolling the sender back on that assumption would leave Azure linked to the
-    # new domain and the Worker naming the old one — and since the link then
-    # looks correct, every later deploy concludes nothing changed and leaves the
-    # stale secret alone for ever. Ask Azure what is actually linked.
-    if ! actual=$(az communication show --name "$COMMS_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP" \
-        --query "linkedDomains" -o tsv 2>/dev/null); then
-      echo "::error::Could not confirm which domain is linked after the update. The Worker is set to donotreply@$sender_domain; check that Azure agrees before relying on the contact form."
-      exit 0
-    fi
-
-    if printf '%s\n' "$actual" | grep -qxF -- "$domain_id"; then
-      if [ "$update_reported_failure" = true ]; then
-        echo "The link update reported failure, but Azure is linked to $sender_domain. Keeping the new sender."
-      fi
-    else
-      echo "::warning::Could not link $sender_domain."
-
-      # Roll the sender back to whatever Azure is actually linked to. wrangler
-      # publishes a secret immediately, so without this the Worker would be
-      # sending as an address Azure has not authorised.
-      previous=$(printf '%s\n' "$actual" | head -n1)
-      previous_sender=""
-      [ -n "$previous" ] && previous_sender=$(az resource show --ids "$previous" \
-        --query "properties.fromSenderDomain" -o tsv 2>/dev/null || true)
-
-      if [ -n "$previous_sender" ]; then
-        if put_secret CONTACT_SENDER_ADDRESS "donotreply@$previous_sender" true; then
-          echo "Sender rolled back to donotreply@$previous_sender, which is what is linked."
-        else
-          echo "::error::Could not roll the sender back. The Worker is set to donotreply@$sender_domain but Azure is linked to $previous — the contact form will fail until the next successful deploy."
-        fi
-      else
-        echo "::error::Could not determine the linked sender to roll back to. The Worker is set to donotreply@$sender_domain but Azure is not linked to it."
-      fi
-
-      exit 0
-    fi
+      --linked-domains "$domain_id" --only-show-errors >/dev/null 2>&1 \
+      || echo "::warning::Could not link $sender_domain; whatever is currently linked stays in use."
   fi
 fi
+
+# Everything above was an *intention*. This is what actually happened.
+#
+# The sender is derived here, after the fact, from whatever Azure reports is
+# linked — not from what this script set out to link. That one change removes a
+# whole class of problem that earlier versions fought with: writing the sender
+# before linking so a failed write could not strand the two systems, rolling it
+# back when the link failed instead, and re-reading Azure because a non-zero
+# exit is not proof the change did not happen. None of that is needed once the
+# value is simply read from reality at the end and republished on every deploy.
+#
+# It also fixes the failure that prompted all this: the linked domain changed in
+# the portal, the script saw the link already correct, concluded nothing had
+# changed, and left the Worker naming a domain that had been deleted.
+actual=$(az communication show --name "$COMMS_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP" \
+  --query "linkedDomains" -o tsv 2>/dev/null | head -n1 || true)
+
+if [ -z "$actual" ]; then
+  echo "::warning::No sender domain is linked to $COMMS_SERVICE; the contact form cannot send."
+  exit 0
+fi
+
+actual_domain=$(az resource show --ids "$actual" \
+  --query "properties.fromSenderDomain" -o tsv 2>/dev/null || true)
+
+# The local part comes from Azure too, rather than being assumed. This was
+# hardcoded `donotreply@`, which is what the managed domain happens to use; a
+# custom domain's sender usernames are whatever you registered, and on
+# kyryll.com that is `DoNotReply`. A mismatch is rejected at send time with
+# nothing on the site to say why.
+actual_user=$(az communication email domain sender-username list \
+  --domain-name "$(basename "$actual")" \
+  --email-service-name "$EMAIL_SERVICE" \
+  --resource-group "$AZURE_RESOURCE_GROUP" \
+  --query "[0].username" -o tsv 2>/dev/null || true)
+
+[ -n "$actual_user" ] || actual_user=donotreply
+
+if [ -z "$actual_domain" ]; then
+  echo "::warning::Could not read the linked domain's sender address; the contact form may not send."
+  exit 0
+fi
+
+SENDER_ADDRESS="$actual_user@$actual_domain"
+[ "$sender_domain" = "$actual_domain" ] || echo "Sender follows what is linked: $SENDER_ADDRESS"
 
 connection=$(az communication list-key \
   --name "$COMMS_SERVICE" \
@@ -228,17 +224,36 @@ fi
 echo "::add-mask::$connection"
 
 put_secret COMMUNICATION_SERVICES_CONNECTION_STRING "$connection"
-# Forced above only when the linked domain is changing. This is the other case:
-# the link is already correct but the secret is absent — a first provision, or
-# someone deleted it — where it simply has to be created.
-put_secret CONTACT_SENDER_ADDRESS "donotreply@$sender_domain"
 put_secret CONTACT_RECIPIENT_ADDRESS "$CONTACT_RECIPIENT_ADDRESS"
+
+# The sender is published as a plain variable, not a secret.
+#
+# It is a public From address, so nothing is gained by hiding it — and a great
+# deal is lost. A secret cannot be read back, so the script could only guess
+# whether it was current, and it guessed by watching for changes *it* made. When
+# the linked domain was changed in the portal instead, the link looked correct,
+# nothing appeared to have changed, and the Worker went on naming a domain that
+# had been deleted. Every send failed and no deploy would have repaired it.
+#
+# A variable is written on every deploy from whatever Azure says is linked, so
+# it cannot drift, whoever moved it.
+echo "SENDER_ADDRESS=$SENDER_ADDRESS" >> "${GITHUB_ENV:-/dev/null}"
+
+# A secret of the same name would shadow the variable, so an older deploy's
+# secret is removed — but only once there is a variable to replace it.
+if printf '%s\n' "$existing" | grep -qx -- CONTACT_SENDER_ADDRESS; then
+  if (cd worker && npx wrangler secret delete CONTACT_SENDER_ADDRESS --force >/dev/null 2>&1); then
+    echo "  CONTACT_SENDER_ADDRESS is now a variable; the old secret was removed"
+  else
+    echo "::warning::Could not remove the CONTACT_SENDER_ADDRESS secret. It shadows the variable, so the sender may stay stale."
+  fi
+fi
 
 # Only claim success when it is true. A run that failed to write a secret leaves
 # the endpoint answering 500, and saying "provisioned" would send whoever reads
 # the log looking anywhere but here.
 if [ "$wrote_all" = true ]; then
-  echo "Contact form provisioned: sender donotreply@$sender_domain"
+  echo "Contact form provisioned: sender $SENDER_ADDRESS"
 else
   echo "::warning::The contact form is not fully configured; /api/contact will answer 500 until the missing secrets are set."
 fi

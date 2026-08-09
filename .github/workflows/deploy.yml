@@ -447,7 +447,15 @@ jobs:
           #
           # ORIGIN is passed as --var, which overrides [vars] and needs no
           # escaping, keeping a URL out of any textual substitution.
-          npx wrangler deploy --var "ORIGIN:$STORAGE_ENDPOINT"
+          # The sender travels as a variable rather than a secret so it is
+          # rewritten from Azure's actual linked domain on every deploy and
+          # cannot go stale. Omitted when provisioning did not run, so a partial
+          # setup does not publish an empty From address.
+          if [ -n "${SENDER_ADDRESS:-}" ]; then
+            npx wrangler deploy --var "ORIGIN:$STORAGE_ENDPOINT" --var "CONTACT_SENDER_ADDRESS:$SENDER_ADDRESS"
+          else
+            npx wrangler deploy --var "ORIGIN:$STORAGE_ENDPOINT"
+          fi
 
       # The Worker's own responses are not cached by Cloudflare, but the
       # subrequests to storage are — index.html for 60s, assets for a year. A

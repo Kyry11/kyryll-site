@@ -119,7 +119,7 @@ if [[ "$*" == *"communication show"* ]]; then
   # it has to answer with an id rather than a placeholder.
   if [[ "$*" == *"linkedDomains"* ]]; then
     [ -n "${STUB_LINKED_READ_FAIL:-}" ] && exit 1
-    # Once the update has been applied, report the new domain.
+    [ -n "${STUB_NO_LINKED_DOMAIN:-}" ] && { echo ""; exit 0; }
     if [ -n "${STUB_STATE:-}" ] && [ -f "${STUB_STATE}" ]; then
       echo "/subscriptions/x/domains/AzureManagedDomain"; exit 0
     fi
@@ -140,7 +140,10 @@ if [[ "$*" == *"communication update"* ]]; then
   exit 0
 fi
 if [[ "$*" == *"resource show"* ]]; then
-  echo "previous.azurecomm.net"; exit 0
+  echo "${STUB_LINKED_SENDER_DOMAIN:-previous.azurecomm.net}"; exit 0
+fi
+if [[ "$*" == *"sender-username list"* ]]; then
+  echo "${STUB_SENDER_USERNAME:-DoNotReply}"; exit 0
 fi
 if [[ "$*" == *"communication list-key"* ]]; then
   [ -n "${STUB_NO_CONNECTION:-}" ] && { echo ""; exit 0; }
@@ -165,6 +168,11 @@ if [[ "$*" == *"secret list"* ]]; then
   [ -n "${STUB_SECRET_LIST_FAIL:-}" ] && exit 1
   [ -n "${STUB_SECRET_LIST_GARBAGE:-}" ] && { echo "<html>not json</html>"; exit 0; }
   echo "${STUB_EXISTING_SECRETS:-[]}"; exit 0
+fi
+if [[ "$*" == *"secret delete"* ]]; then
+  [ -n "${STUB_SECRET_DELETE_FAIL:-}" ] && exit 1
+  [ -n "${STUB_SECRET_DELETE_LOG:-}" ] && echo "${@: -2:1}" >> "$STUB_SECRET_DELETE_LOG"
+  exit 0
 fi
 if [[ "$*" == *"secret put"* ]]; then
   value=$(cat)
@@ -281,10 +289,12 @@ SECRET_LOG="$STUB/secrets"; : > "$SECRET_LOG"
 
 check "provisions and sets all three secrets"        0 \
   env STUB_SECRET_LOG="$SECRET_LOG" "$D/provision-email.sh"
-if [ "$(sort -u "$SECRET_LOG" | tr '\n' ' ')" = "COMMUNICATION_SERVICES_CONNECTION_STRING CONTACT_RECIPIENT_ADDRESS CONTACT_SENDER_ADDRESS " ]; then
-  printf '  ok    %s\n' "and set exactly the three the Worker reads"; pass=$((pass + 1))
+# Two secrets, not three: the sender is a variable now, so it cannot be one
+# deploy behind the domain it names.
+if [ "$(sort -u "$SECRET_LOG" | tr '\n' ' ')" = "COMMUNICATION_SERVICES_CONNECTION_STRING CONTACT_RECIPIENT_ADDRESS " ]; then
+  printf '  ok    %s\n' "and sets exactly the two secrets the Worker still needs"; pass=$((pass + 1))
 else
-  printf '  FAIL  %s (%s)\n' "and set exactly the three the Worker reads" "$(tr '\n' ' ' < "$SECRET_LOG")"; fail=$((fail + 1))
+  printf '  FAIL  %s (%s)\n' "and sets exactly the two secrets the Worker still needs" "$(tr '\n' ' ' < "$SECRET_LOG")"; fail=$((fail + 1))
 fi
 
 # Rotation must stay an explicit act, not something a deploy does silently.
@@ -299,92 +309,51 @@ else
   printf '  FAIL  %s (%s)\n' "and overwrote nothing" "$(tr '\n' ' ' < "$SECRET_LOG")"; fail=$((fail + 1))
 fi
 
-# The sender is derived from whichever domain is linked, so when that changes
-# the secret has to follow — it cannot be read back and compared.
+# The sender follows whatever Azure reports is linked, read after the fact.
 #
-# STUB_STATE is what makes this the *success* case. Without it the update wrote
-# to /dev/null, the re-read still returned the old domain, and the script rolled
-# the sender back — so a test named for a successful change was exercising
-# rollback. The name-only assertion could not see it either: both the new write
-# and the rollback are CONTACT_SENDER_ADDRESS, and `sort -u` collapsed them into
-# one. wrangler publishes immediately, so the value that ends up set is the
-# whole point.
-: > "$SECRET_LOG"
-VALUE_LOG="$STUB/secretvalues"; : > "$VALUE_LOG"
-STATE="$STUB/linkstate"; rm -f "$STATE"
-check "rewrites the sender when the linked domain changes" 0 \
-  env STUB_LINKED_DOMAIN=/subscriptions/x/domains/SomeOtherDomain \
-      STUB_STATE="$STATE" STUB_SECRET_LOG="$SECRET_LOG" STUB_SECRET_VALUE_LOG="$VALUE_LOG" \
-      STUB_EXISTING_SECRETS='[{"name":"COMMUNICATION_SERVICES_CONNECTION_STRING"},{"name":"CONTACT_SENDER_ADDRESS"},{"name":"CONTACT_RECIPIENT_ADDRESS"}]' \
+# This replaces a pile of machinery that existed only because a secret cannot be
+# read back: writing the sender before linking so a failed write could not
+# strand the two systems, rolling it back when the link failed, and re-reading
+# Azure because a non-zero exit is not proof the change did not happen. A
+# variable derived from reality at the end needs none of it.
+SENDER_ENV="$STUB/senderenv"
+
+: > "$SENDER_ENV"
+check "publishes the sender of whatever is actually linked" 0 \
+  env GITHUB_ENV="$SENDER_ENV" STUB_LINKED_DOMAIN=/subscriptions/x/domains/SomeOtherDomain \
       "$D/provision-email.sh"
-rm -f "$STATE"
-if [ "$(sort -u "$SECRET_LOG" | tr '\n' ' ')" = "CONTACT_SENDER_ADDRESS " ]; then
-  printf '  ok    %s\n' "and rewrites only the sender"; pass=$((pass + 1))
+if grep -q '^SENDER_ADDRESS=DoNotReply@previous.azurecomm.net$' "$SENDER_ENV"; then
+  printf '  ok    %s\n' "and not the one it set out to link"; pass=$((pass + 1))
 else
-  printf '  FAIL  %s (%s)\n' "and rewrites only the sender" "$(tr '\n' ' ' < "$SECRET_LOG")"; fail=$((fail + 1))
-fi
-final=$(grep 'CONTACT_SENDER_ADDRESS=' "$VALUE_LOG" | tail -n1)
-if [ "$final" = "CONTACT_SENDER_ADDRESS=donotreply@abc123.azurecomm.net" ]; then
-  printf '  ok    %s\n' "and leaves it set to the new sender, not rolled back"; pass=$((pass + 1))
-else
-  printf '  FAIL  %s (%s)\n' "and leaves it set to the new sender, not rolled back" "$final"; fail=$((fail + 1))
+  printf '  FAIL  %s (%s)\n' "and not the one it set out to link" "$(grep SENDER_ADDRESS "$SENDER_ENV" || echo none)"; fail=$((fail + 1))
 fi
 
-# The ordering that makes a failed write recoverable.
-#
-# Linking first and writing second left Azure on the new domain with the Worker
-# naming the old one — and the next deploy saw the link already correct, decided
-# nothing had changed, and left the stale secret alone for ever.
-: > "$SECRET_LOG"
-check "does not link when the sender secret cannot be written" 0 \
-  env STUB_LINKED_DOMAIN=/subscriptions/x/domains/SomeOtherDomain \
-      STUB_SECRET_PUT_FAIL=1 STUB_SECRET_LOG="$SECRET_LOG" "$D/provision-email.sh"
-expect_output "and says both sides stay put" "next deploy will retry" \
-  env STUB_LINKED_DOMAIN=/subscriptions/x/domains/SomeOtherDomain \
-      STUB_SECRET_PUT_FAIL=1 "$D/provision-email.sh"
+# The local part is registered on the domain and is not always lowercase.
+: > "$SENDER_ENV"
+check "takes the local part from Azure rather than assuming one" 0 \
+  env GITHUB_ENV="$SENDER_ENV" STUB_SENDER_USERNAME=Postmaster "$D/provision-email.sh"
+if grep -q '^SENDER_ADDRESS=Postmaster@' "$SENDER_ENV"; then
+  printf '  ok    %s\n' "and preserves its case"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (%s)\n' "and preserves its case" "$(grep SENDER_ADDRESS "$SENDER_ENV" || echo none)"; fail=$((fail + 1))
+fi
 
-# The mirror image: the write succeeds and the link fails. wrangler publishes a
-# secret immediately, so without reconciling, the Worker would already be sending
-# as an address Azure has not authorised.
-: > "$SECRET_LOG"
-check "rolls the sender back when linking fails"     0 \
-  env STUB_LINKED_DOMAIN=/subscriptions/x/domains/SomeOtherDomain \
-      STUB_LINK_FAIL=1 STUB_SECRET_LOG="$SECRET_LOG" "$D/provision-email.sh"
-expect_output "and says what it rolled back to" "Sender rolled back to donotreply@previous.azurecomm.net" \
-  env STUB_LINKED_DOMAIN=/subscriptions/x/domains/SomeOtherDomain \
+# A link that fails is a warning, not a reason to publish a sender Azure will
+# not accept.
+: > "$SENDER_ENV"
+check "keeps the linked sender when linking fails"   0 \
+  env GITHUB_ENV="$SENDER_ENV" STUB_LINKED_DOMAIN=/subscriptions/x/domains/SomeOtherDomain \
       STUB_LINK_FAIL=1 "$D/provision-email.sh"
-
-# The ambiguous failure: az exits non-zero but the change landed server-side.
-#
-# Trusting the exit code here rolls the sender back to a domain Azure is no
-# longer linked to — and because the link then looks correct, every later deploy
-# concludes nothing changed and leaves the stale secret alone for ever.
-: > "$SECRET_LOG"
-STATE="$STUB/linkstate"; rm -f "$STATE"
-VALUE_LOG="$STUB/secretvalues"; : > "$VALUE_LOG"
-check "keeps the new sender when the link landed despite an error" 0 \
-  env STUB_LINKED_DOMAIN=/subscriptions/x/domains/SomeOtherDomain \
-      STUB_LINK_FAIL=1 STUB_LINK_APPLIED=1 STUB_STATE="$STATE" \
-      STUB_SECRET_LOG="$SECRET_LOG" STUB_SECRET_VALUE_LOG="$VALUE_LOG" "$D/provision-email.sh"
-rm -f "$STATE"
-# The exit code is 0 either way, so it proves nothing on its own — the value is
-# what distinguishes keeping the new sender from rolling it back.
-if ! grep -q 'CONTACT_SENDER_ADDRESS=donotreply@previous' "$VALUE_LOG"; then
-  printf '  ok    %s\n' "and never wrote the old sender back"; pass=$((pass + 1))
+if grep -q '^SENDER_ADDRESS=DoNotReply@previous.azurecomm.net$' "$SENDER_ENV"; then
+  printf '  ok    %s\n' "and never publishes one Azure has not authorised"; pass=$((pass + 1))
 else
-  printf '  FAIL  %s (%s)\n' "and never wrote the old sender back" "$(tr '\n' ' ' < "$VALUE_LOG")"; fail=$((fail + 1))
+  printf '  FAIL  %s (%s)\n' "and never publishes one Azure has not authorised" "$(grep SENDER_ADDRESS "$SENDER_ENV" || echo none)"; fail=$((fail + 1))
 fi
-expect_output "and says the update reported failure but landed" "reported failure, but Azure is linked" \
-  env STUB_LINKED_DOMAIN=/subscriptions/x/domains/SomeOtherDomain \
-      STUB_LINK_FAIL=1 STUB_LINK_APPLIED=1 STUB_STATE="$STATE" "$D/provision-email.sh"
-rm -f "$STATE"
 
-# An unreadable linked-domain list makes safe reconciliation impossible, so it
-# must stop rather than guess.
-check "stops when the linked domains cannot be read"  0 \
-  env STUB_LINKED_READ_FAIL=1 "$D/provision-email.sh"
-expect_output "and leaves the sender configuration alone" "leaving the sender configuration alone" \
-  env STUB_LINKED_READ_FAIL=1 "$D/provision-email.sh"
+check "stops when nothing at all is linked"          0 \
+  env STUB_NO_LINKED_DOMAIN=1 "$D/provision-email.sh"
+expect_output "and says the form cannot send" "cannot send" \
+  env STUB_NO_LINKED_DOMAIN=1 "$D/provision-email.sh"
 
 # A failed read must not cause a working secret to be overwritten.
 #
@@ -426,6 +395,41 @@ check "warns, not fails, when a create is refused"   0 \
   env STUB_EMAIL_SVC_MISSING=1 STUB_CREATE_FAIL=1 "$D/provision-email.sh"
 check "warns, not fails, with no connection string"  0 env STUB_NO_CONNECTION=1 "$D/provision-email.sh"
 check "warns, not fails, when a secret put is denied" 0 env STUB_SECRET_PUT_FAIL=1 "$D/provision-email.sh"
+
+echo "the sender address must follow Azure, whoever changed it"
+# The failure this is for: the linked domain was changed in the portal, so the
+# script saw the link already correct, concluded nothing had changed, and left
+# the Worker naming a domain that had been deleted.
+SENDER_ENV="$STUB/senderenv"; : > "$SENDER_ENV"
+DELETE_LOG="$STUB/deletes2"; : > "$DELETE_LOG"
+
+check "publishes the sender for the deploy to pass as a var" 0 \
+  env GITHUB_ENV="$SENDER_ENV" STUB_SECRET_DELETE_LOG="$DELETE_LOG" \
+      STUB_EXISTING_SECRETS='[{"name":"CONTACT_SENDER_ADDRESS"}]' "$D/provision-email.sh"
+if grep -q '^SENDER_ADDRESS=DoNotReply@' "$SENDER_ENV"; then
+  printf '  ok    %s\n' "and takes the local part from Azure, not a guess"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (%s)\n' "and takes the local part from Azure, not a guess" "$(tr '\n' ' ' < "$SENDER_ENV")"; fail=$((fail + 1))
+fi
+# A secret of the same name shadows the variable, so it has to go.
+if grep -q CONTACT_SENDER_ADDRESS "$DELETE_LOG"; then
+  printf '  ok    %s\n' "and removes a shadowing secret left by an older deploy"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s\n' "and removes a shadowing secret left by an older deploy"; fail=$((fail + 1))
+fi
+
+: > "$DELETE_LOG"
+check "removes nothing when no such secret exists" 0 \
+  env STUB_SECRET_DELETE_LOG="$DELETE_LOG" "$D/provision-email.sh"
+if [ ! -s "$DELETE_LOG" ]; then
+  printf '  ok    %s\n' "and does not delete what is not there"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s\n' "and does not delete what is not there"; fail=$((fail + 1))
+fi
+
+# The managed domain can be removed on purpose once a custom one works.
+expect_output "uses the already linked domain instead of recreating a deleted one" "Using the already linked sender domain" \
+  env STUB_DOMAIN_MISSING=1 "$D/provision-email.sh"
 
 echo "custom-sender-domain.sh  (must publish the ownership TXT and nothing else)"
 export ZONE_NAME=kyryll.com EMAIL_SERVICE=kyryll-email

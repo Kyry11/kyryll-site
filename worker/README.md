@@ -223,13 +223,27 @@ npx wrangler secret put CONTACT_RECIPIENT_ADDRESS
 | Secret | Value |
 |---|---|
 | `COMMUNICATION_SERVICES_CONNECTION_STRING` | From the Azure Communication Services resource |
-| `CONTACT_SENDER_ADDRESS` | Verified sender, e.g. `donotreply@<your-domain>` |
 | `CONTACT_RECIPIENT_ADDRESS` | Where messages land |
+
+`CONTACT_SENDER_ADDRESS` is not in that list: the deploy publishes it as a
+variable, derived from the linked domain. Setting it by hand as a secret would
+shadow the variable, so the deploy removes such a secret if it finds one.
 
 The recipient is a secret deliberately: it is a real inbox and this repository
 is public.
 
-`ORIGIN` is not a secret, but it is not known until the storage account exists,
+`CONTACT_SENDER_ADDRESS` is a **variable**, not a secret. It is a public From
+address, so nothing is gained by hiding it and a great deal is lost: a secret
+cannot be read back, so the deploy could only guess whether it was current — and
+it guessed by watching for changes it made itself. Change the linked domain in
+the Azure portal instead and the link looks correct, nothing appears to have
+changed, and the Worker goes on naming a domain that no longer exists. Every
+send fails and no redeploy repairs it. As a variable it is rewritten on every
+deploy from whatever Azure reports is linked, including the local part, which is
+read from the domain's registered sender usernames rather than assumed to be
+`donotreply`.
+
+`ORIGIN` is not a secret either, and is not known until the storage account exists,
 so `wrangler.toml` carries a placeholder and both the deploy and `npm run dev`
 pass the real value as `--var`. The rate limiter needs no id at all — a Durable
 Object is addressed by class name — so nothing is substituted into that file.
