@@ -207,9 +207,11 @@ this subscription already has `kyryll.com`, `cronti.me` and `no1.gives`
 registered on storage accounts that way.
 
 **One real constraint.** A custom domain belongs to exactly one storage account
-at a time. `kyryll.com` is currently registered on the previous account, so the
-deploy will report that and skip rather than fail — clear it from the old
-account first if you want the fallback active.
+at a time. If it is still held elsewhere the deploy names the holder and the
+command to clear it, then skips rather than failing — the site does not depend
+on the fallback, so losing it is not a reason to stop shipping. The apex step
+logs whether the fallback is actually live, so a half-configured state says so
+rather than waiting to be discovered during an incident.
 
 The contact form additionally needs three Worker secrets, set once with
 `wrangler secret put` so the workflow never handles them. See

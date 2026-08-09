@@ -22,8 +22,12 @@ cat > "$STUB/curl" <<'STUBEOF'
 import sys, os, json
 a = ' '.join(sys.argv)
 def out(o): print(json.dumps(o))
+if os.environ.get('STUB_CURL_EXIT'):
+    sys.exit(int(os.environ['STUB_CURL_EXIT']))
 if os.environ.get('STUB_CF_RAW'):
     print(os.environ['STUB_CF_RAW']); sys.exit(0)
+if '-X DELETE' in a and os.environ.get('STUB_DELETE_LOG'):
+    open(os.environ['STUB_DELETE_LOG'], 'a').write(a.split('dns_records/')[-1].split()[0] + "\n")
 if os.environ.get('STUB_CF_ZONE_FAIL'):
     out({"success": False, "errors": [{"code": 9109, "message": "Invalid access token"}]}); sys.exit(0)
 if '-X DELETE' in a:
@@ -35,7 +39,11 @@ if 'dns_records' in a and ('-X POST' in a or '-X PUT' in a):
         "proxied": os.environ.get('STUB_CF_PROXIED', 'true') == 'true'}}); sys.exit(0)
 if 'dns_records' in a:
     if 'asverify' in a:
-        out({"success": True, "result": []}); sys.exit(0)
+        if os.environ.get('STUB_ASVERIFY_EXISTS'):
+            out({"success": True, "result": [{"id": "av1"}, {"id": "av2"}]})
+        else:
+            out({"success": True, "result": []})
+        sys.exit(0)
     kind = os.environ.get('STUB_APEX', 'cname')
     if kind == 'cname':
         out({"success": True, "result": [{"id": "c1", "type": "CNAME", "name": "kyryll.com"}]})
@@ -142,7 +150,31 @@ expect_output "warns when the domain is not registered on this account" "NOT a w
   env STUB_APEX=cname STUB_CURRENT_DOMAIN= "$D/point-apex.sh"
 
 echo "remove-asverify.sh"
-check "removes the record"                           0 env ASVERIFY_NAME=asverify.kyryll.com "$D/remove-asverify.sh"
+export ASVERIFY_NAME=asverify.kyryll.com
+check "no record to remove is fine"                  0 "$D/remove-asverify.sh"
+
+# The previous version of this asserted only an exit code against an empty
+# record list, so it never issued a DELETE at all.
+DELETE_LOG="$STUB/deletes"; : > "$DELETE_LOG"
+check "deletes every matching record"                0 \
+  env STUB_ASVERIFY_EXISTS=1 STUB_DELETE_LOG="$DELETE_LOG" "$D/remove-asverify.sh"
+if [ "$(wc -l < "$DELETE_LOG" | tr -d ' ')" = "2" ]; then
+  printf '  ok    %s\n' "and issued a DELETE for each"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (deletes: %s)\n' "and issued a DELETE for each" "$(cat "$DELETE_LOG")"; fail=$((fail + 1))
+fi
+
+echo "transport failures must never abort the deploy"
+# These steps run before the upload and the Worker deploy, so a non-zero exit
+# skips them. `response=$(cf ...)` aborts under set -e when curl exits non-zero,
+# and pipefail did the same for a non-JSON body.
+check "register survives curl exiting non-zero"      0 env STUB_CURL_EXIT=7 "$D/register-custom-domain.sh"
+check "remove survives curl exiting non-zero"        0 env STUB_CURL_EXIT=7 "$D/remove-asverify.sh"
+check "remove survives a non-JSON body"              0 env STUB_CF_RAW='<html>502</html>' "$D/remove-asverify.sh"
+check "register survives a non-JSON body"            0 env STUB_CF_RAW='<html>502</html>' "$D/register-custom-domain.sh"
+# The apex step is deliberately the opposite: it is not optional.
+check "point-apex still fails loudly on a bad body"  1 env STUB_CF_RAW='<html>502</html>' "$D/point-apex.sh"
+check "point-apex still fails on curl exiting"       1 env STUB_CURL_EXIT=7 "$D/point-apex.sh"
 
 echo
 printf '%s passed, %s failed\n' "$pass" "$fail"
