@@ -378,3 +378,39 @@ test('serveStatic refuses to fall back for /api/, independently of the router', 
   assert.equal(res.status, 404)
   assert.equal(requested.length, 1, 'must not attempt the index.html fallback')
 })
+
+test('the fallback preserves SPA routing, not just the root', async () => {
+  // The degraded path must not quietly change how the site routes. Serving
+  // storage's error document with a 404 for /about-me breaks navigation that
+  // works normally, and only when something has already gone wrong.
+  const saved = globalThis.fetch
+  let call = 0
+  globalThis.fetch = async (...args) => {
+    if (++call === 1) throw new TypeError('transient failure')
+    return saved(...args)
+  }
+
+  try {
+    const res = await get('/about-me')
+    assert.equal(res.status, 200, 'an unknown page is still the app shell with a 200')
+    assert.match(await res.text(), /site/)
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+test('the fallback still 404s a missing asset rather than serving HTML', async () => {
+  const saved = globalThis.fetch
+  let call = 0
+  globalThis.fetch = async (...args) => {
+    if (++call === 1) throw new TypeError('transient failure')
+    return saved(...args)
+  }
+
+  try {
+    const res = await get('/img/missing.png')
+    assert.equal(res.status, 404, 'the exclusions hold on the degraded path too')
+  } finally {
+    globalThis.fetch = saved
+  }
+})

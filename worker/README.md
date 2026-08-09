@@ -45,12 +45,11 @@ place beat splitting the behaviour across three Cloudflare rulesets *and* code.
 That is a preference about where the logic lives, not a claim that it had
 nowhere else to go.
 
-Pointing a proxied Cloudflare record straight at the storage endpoint has its
-own problem: **kyryll.com is an apex domain**, and Azure Storage verifies a
-custom domain through a CNAME on a subdomain — the `asverify` record. Fetching
-the storage endpoint from inside the Worker sidesteps that for the main path.
-The deploy registers the custom domain anyway, via `asverify`, so that the
-proxied apex record remains a working fallback if the Worker is ever disabled.
+Fetching the storage endpoint from inside the Worker means storage only ever
+sees its own hostname, so the main path never depends on Azure knowing the
+custom domain exists. The deploy registers it anyway, through the indirect
+`asverify` method, so the proxied apex record stays a working fallback if the
+Worker is ever disabled.
 
 That replaced an Azure Static Web App, which had bundled four separate jobs:
 serving the build, applying response headers, rewriting unmatched paths to

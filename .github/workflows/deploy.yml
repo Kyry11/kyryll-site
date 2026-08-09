@@ -107,6 +107,13 @@ jobs:
         working-directory: worker
         run: npx wrangler deploy --dry-run --var ORIGIN:https://example.invalid
 
+      # The deploy job never runs on a pull request, so without this the
+      # scripts that create, update and delete DNS records and register an
+      # Azure custom domain would first execute against production. Stubs
+      # replace curl/az/dig; nothing here reaches a network.
+      - name: Test — deploy scripts
+        run: scripts/deploy/test/run.sh
+
   # ---- deployment: master only, and the only job that sees a secret --------
   deploy:
     needs: validate
@@ -264,184 +271,31 @@ jobs:
 
       # ---- the fallback path -----------------------------------------------
       #
-      # None of this is needed for the site to work: the Worker route
-      # intercepts every request and fetches storage by its own hostname. It
-      # exists so that turning the Worker off — or a Worker that fails outright
-      # — leaves a working site behind, served by the proxied apex record
-      # straight from storage.
+      # None of this is needed for the site to work: the Worker route intercepts
+      # every request and fetches storage by its own hostname. It exists so that
+      # turning the Worker off leaves a working site behind, served by the
+      # proxied apex record straight from storage.
       #
-      # For that to work Azure has to accept `Host: kyryll.com`, which means the
-      # custom domain must be registered on the storage account. Verification
-      # goes through an `asverify` CNAME, so the apex record never has to be
-      # unproxied or repointed and there is no outage window.
+      # The logic lives in scripts/deploy/ rather than inline, so that
+      # scripts/deploy/test/run.sh can exercise it against stubbed curl/az/dig
+      # in the validation job. A pull request never runs this job, so inline
+      # shell here would first execute against production.
 
-      - name: Resolve the zone name
+      - name: Resolve and verify the Cloudflare zone
         if: ${{ env.CLOUDFLARE_ZONE_ID != '' }}
-        run: |
-          set -euo pipefail
-          CF_API="https://api.cloudflare.com/client/v4"
-
-          response=$(curl -sS "$CF_API/zones/$CLOUDFLARE_ZONE_ID" \
-            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
-
-          if ! echo "$response" | jq -e '.success == true' >/dev/null 2>&1; then
-            echo "::error::Could not read the Cloudflare zone. The token needs Zone > Zone > Read."
-            echo "$response" | jq -c '{success, errors}' 2>/dev/null || printf '%s\n' "$response" | head -c 500
-            exit 1
-          fi
-
-          ZONE_NAME=$(echo "$response" | jq -r '.result.name')
-          echo "ZONE_NAME=$ZONE_NAME" >> "$GITHUB_ENV"
-          echo "Zone: $ZONE_NAME"
-
-          # The fallback reaches storage over HTTPS with Host: <zone>, and Azure
-          # Storage has no certificate for a custom domain — it serves its own
-          # *.web.core.windows.net cert. Under Full (Strict) Cloudflare validates
-          # that and refuses with a 526, so the fallback would be dead on
-          # arrival. A warning rather than a failure: the main path is the
-          # Worker, and this only degrades the safety net.
-          mode=$(curl -sS "$CF_API/zones/$CLOUDFLARE_ZONE_ID/settings/ssl" \
-            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            | jq -r '.result.value // "unknown"')
-          echo "SSL/TLS mode: $mode"
-          if [ "$mode" = "strict" ]; then
-            echo "::warning::SSL/TLS is Full (Strict). Azure Storage serves no certificate for a custom domain, so the DNS fallback would return 526 if the Worker were ever disabled."
-          fi
+        run: scripts/deploy/resolve-zone.sh
 
       - name: Register the custom domain on the storage account
         if: ${{ env.CLOUDFLARE_ZONE_ID != '' && env.ZONE_NAME != '' }}
-        run: |
-          set -euo pipefail
-          CF_API="https://api.cloudflare.com/client/v4"
-          AUTH="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+        run: scripts/deploy/register-custom-domain.sh
 
-          current=$(az storage account show \
-            --name "$AZURE_STORAGE_ACCOUNT" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --query "customDomain.name" -o tsv 2>/dev/null || true)
-          current=$(printf '%s' "$current" | tr '[:upper:]' '[:lower:]' | sed 's/\.$//')
-
-          if [ "$current" = "$ZONE_NAME" ]; then
-            echo "Custom domain already registered; nothing to do."
-            exit 0
-          fi
-
-          # asverify is the indirect verification method: Azure looks for
-          # asverify.<domain> pointing at asverify.<blob host>, and never
-          # requires the apex record itself to point anywhere in particular. It
-          # must be DNS-only — a proxied record resolves to Cloudflare and Azure
-          # would not see the CNAME it is looking for.
-          ASVERIFY_NAME="asverify.$ZONE_NAME"
-          ASVERIFY_TARGET="asverify.$STORAGE_BLOB_HOST"
-          echo "ASVERIFY_NAME=$ASVERIFY_NAME" >> "$GITHUB_ENV"
-
-          existing=$(curl -sS -G "$CF_API/zones/$CLOUDFLARE_ZONE_ID/dns_records" \
-            --data-urlencode "type=CNAME" --data-urlencode "name=$ASVERIFY_NAME" -H "$AUTH")
-          record_id=$(echo "$existing" | jq -r '.result[0].id // empty')
-          payload=$(jq -n --arg name "$ASVERIFY_NAME" --arg content "$ASVERIFY_TARGET" \
-            '{type:"CNAME", name:$name, content:$content, ttl:120, proxied:false}')
-
-          if [ -n "$record_id" ]; then
-            response=$(curl -sS -X PUT "$CF_API/zones/$CLOUDFLARE_ZONE_ID/dns_records/$record_id" \
-              -H "$AUTH" -H "Content-Type: application/json" --data "$payload")
-          else
-            response=$(curl -sS -X POST "$CF_API/zones/$CLOUDFLARE_ZONE_ID/dns_records" \
-              -H "$AUTH" -H "Content-Type: application/json" --data "$payload")
-          fi
-
-          if ! echo "$response" | jq -e '.success == true' >/dev/null 2>&1; then
-            echo "::error::Could not create $ASVERIFY_NAME. The token needs Zone > DNS > Edit."
-            echo "$response" | jq -c '{success, errors}' 2>/dev/null || printf '%s\n' "$response" | head -c 500
-            exit 1
-          fi
-
-          echo "Waiting for $ASVERIFY_NAME to resolve..."
-          for attempt in $(seq 1 18); do
-            seen=$(dig +short CNAME "$ASVERIFY_NAME" @1.1.1.1 | sed 's/\.$//' | head -n1 || true)
-            [ "$seen" = "$ASVERIFY_TARGET" ] && break
-            echo "  attempt $attempt/18: '$seen'"
-            sleep 10
-          done
-
-          # Azure re-checks DNS itself and can be a little behind the resolver.
-          for attempt in $(seq 1 6); do
-            if az storage account update \
-              --name "$AZURE_STORAGE_ACCOUNT" \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --custom-domain "$ZONE_NAME" \
-              --use-subdomain true \
-              --only-show-errors; then
-              echo "Custom domain registered."
-              exit 0
-            fi
-            echo "Not verified yet; retrying in 20s (attempt $attempt/6)"
-            sleep 20
-          done
-
-          echo "::error::Azure would not verify $ZONE_NAME via $ASVERIFY_NAME."
-          exit 1
-
-      # Cleanup runs whether or not verification succeeded. The record has done
-      # its job either way and is nothing but clutter afterwards.
       - name: Remove the asverify record
         if: ${{ always() && env.ASVERIFY_NAME != '' && env.CLOUDFLARE_ZONE_ID != '' }}
-        run: |
-          set -euo pipefail
-          CF_API="https://api.cloudflare.com/client/v4"
-          AUTH="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
-
-          curl -sS -G "$CF_API/zones/$CLOUDFLARE_ZONE_ID/dns_records" \
-            --data-urlencode "type=CNAME" --data-urlencode "name=$ASVERIFY_NAME" -H "$AUTH" \
-            | jq -r '.result[]?.id' \
-            | while IFS= read -r id; do
-                [ -n "$id" ] || continue
-                curl -sS -X DELETE "$CF_API/zones/$CLOUDFLARE_ZONE_ID/dns_records/$id" -H "$AUTH" >/dev/null
-                echo "Removed $ASVERIFY_NAME"
-              done
+        run: scripts/deploy/remove-asverify.sh
 
       - name: Point the apex record at the storage account
         if: ${{ env.CLOUDFLARE_ZONE_ID != '' && env.ZONE_NAME != '' }}
-        run: |
-          set -euo pipefail
-          CF_API="https://api.cloudflare.com/client/v4"
-          AUTH="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
-
-          # Deliberately non-destructive. This record is what makes the Worker
-          # route fire at all, so a step that could delete it is a step that can
-          # take the site down. It updates a CNAME it finds, creates one where
-          # the apex is empty, and otherwise reports and stops.
-          records=$(curl -sS -G "$CF_API/zones/$CLOUDFLARE_ZONE_ID/dns_records" \
-            --data-urlencode "name=$ZONE_NAME" -H "$AUTH")
-
-          cname_id=$(echo "$records" | jq -r '.result[]? | select(.type=="CNAME") | .id' | head -n1)
-          address_count=$(echo "$records" | jq -r '[.result[]? | select(.type=="A" or .type=="AAAA")] | length')
-
-          payload=$(jq -n --arg name "$ZONE_NAME" --arg content "$STORAGE_WEB_HOST" \
-            '{type:"CNAME", name:$name, content:$content, ttl:1, proxied:true}')
-
-          if [ -n "$cname_id" ]; then
-            response=$(curl -sS -X PUT "$CF_API/zones/$CLOUDFLARE_ZONE_ID/dns_records/$cname_id" \
-              -H "$AUTH" -H "Content-Type: application/json" --data "$payload")
-          elif [ "$address_count" -eq 0 ]; then
-            response=$(curl -sS -X POST "$CF_API/zones/$CLOUDFLARE_ZONE_ID/dns_records" \
-              -H "$AUTH" -H "Content-Type: application/json" --data "$payload")
-          else
-            echo "::warning::$ZONE_NAME has $address_count A/AAAA record(s) and no CNAME. Not touching them — replace them with a proxied CNAME to $STORAGE_WEB_HOST by hand to enable the fallback."
-            exit 0
-          fi
-
-          if ! echo "$response" | jq -e '.success == true' >/dev/null 2>&1; then
-            echo "::error::Could not update the apex record. The token needs Zone > DNS > Edit."
-            echo "$response" | jq -c '{success, errors}' 2>/dev/null || printf '%s\n' "$response" | head -c 500
-            exit 1
-          fi
-
-          proxied=$(echo "$response" | jq -r '.result.proxied')
-          echo "$ZONE_NAME -> $STORAGE_WEB_HOST (proxied: $proxied)"
-          if [ "$proxied" != "true" ]; then
-            echo "::error::The apex record is not proxied. The Worker route only fires for a proxied hostname; the site is down until this is fixed."
-            exit 1
-          fi
+        run: scripts/deploy/point-apex.sh
 
       - name: Upload the build to $web
         run: |

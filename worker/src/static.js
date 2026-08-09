@@ -252,9 +252,27 @@ export async function passthrough(request, env) {
   const url = new URL(request.url)
   const path = url.pathname === '/' ? '/index.html' : url.pathname
 
-  const response = await fetch(`${origin}${path}`, {
+  const get = (at) => fetch(`${origin}${at}`, {
     method: request.method === 'HEAD' ? 'HEAD' : 'GET',
   })
+
+  let response = await get(path)
+
+  /*
+   * The fallback applies here too.
+   *
+   * Without it a degraded /about-me returned storage's error document with a
+   * 404 — the site's own navigation broken in a way the normal path handles,
+   * and only on the code path that runs when something has already gone wrong.
+   * A fallback that quietly changes the site's routing behaviour is worse than
+   * one that is obviously absent.
+   */
+  if (response.status === 404 && shouldFallBack(path)) {
+    response = await get('/index.html')
+    if (response.ok) {
+      response = new Response(response.body, { status: 200, headers: response.headers })
+    }
+  }
 
   const headers = new Headers(response.headers)
   for (const name of [...headers.keys()]) {

@@ -119,11 +119,11 @@ headers, rewrites unmatched paths to index.html, and hosts `/api/contact`.
 Storage does none of that: it has no compute, and a storage account cannot emit
 an arbitrary response header at all. See [worker/README.md](worker/README.md).
 
-It replaced Azure Static Web Apps, which bundled all four jobs. The deciding
-constraint was the apex domain: Azure Storage only verifies a custom domain
-through a CNAME on a *subdomain*, so kyryll.com could never be registered on the
-account. Fetching the storage endpoint from inside the Worker sidesteps the
-question — storage only ever sees its own hostname.
+It replaced Azure Static Web Apps, which bundled all four jobs. Fetching the
+storage endpoint from inside the Worker means storage only ever sees its own
+hostname, so the main serving path does not depend on Azure knowing the custom
+domain exists at all. (The deploy registers it anyway, for the fallback — see
+below.)
 
 Five GitHub encrypted secrets:
 
@@ -192,12 +192,24 @@ route fire at all, so it updates a CNAME it finds and creates one where the apex
 is empty, but if it finds A/AAAA records it reports and stops rather than
 deleting them.
 
-**One precondition, and it is easy to miss.** The fallback reaches storage over
-HTTPS with `Host: kyryll.com`, and Azure Storage has no certificate for a custom
-domain — it serves its own `*.web.core.windows.net`. Under SSL/TLS mode **Full
-(Strict)** Cloudflare validates that and returns 526, so the fallback would be
-dead on arrival. **Full** is required. The deploy reads the zone's mode and
-warns rather than failing, since only the safety net is affected.
+**On origin TLS.** An earlier version of this section claimed the fallback
+needed SSL/TLS mode `Full` rather than `Full (Strict)`. That was wrong. In
+Full (Strict) Cloudflare validates the origin certificate against the *target*
+hostname — the CNAME target — and Azure serves a valid public certificate for
+`*.z8.web.core.windows.net`. The zone runs Full (strict) today and has been
+serving from blob storage through Cloudflare the whole time, which settles it.
+Nothing here requires weakening origin authentication.
+
+**On apex custom domains.** Microsoft's custom-domain page is written around
+the direct CNAME method, which a root domain cannot satisfy. The indirect
+`asverify` method verifies a *subdomain* record, and apex registration works:
+this subscription already has `kyryll.com`, `cronti.me` and `no1.gives`
+registered on storage accounts that way.
+
+**One real constraint.** A custom domain belongs to exactly one storage account
+at a time. `kyryll.com` is currently registered on the previous account, so the
+deploy will report that and skip rather than fail — clear it from the old
+account first if you want the fallback active.
 
 The contact form additionally needs three Worker secrets, set once with
 `wrangler secret put` so the workflow never handles them. See
