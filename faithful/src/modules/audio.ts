@@ -251,26 +251,47 @@ export function createAudio(): Audio {
     },
 
     playFireworkStabs(): void {
-      if (muted) return
+      /*
+       * Releasing is unconditional, and that is the point.
+       *
+       * Each of these holds a buffered copy of a five-minute track, loaded
+       * during the cold open so it is ready on cue. Both mute paths used to
+       * return without releasing anything — muted before the display, and muted
+       * during it — so a visitor who turned the sound off kept four of them
+       * attached for the life of the page. The one path that did release was
+       * the one where they had already played.
+       */
+      const release = (stab: HTMLAudioElement): void => {
+        stab.pause()
+        // Drop the buffer rather than leaving a decoded copy of the track
+        // parked for the life of the page.
+        stab.removeAttribute('src')
+        stab.load()
+      }
+
+      if (muted) {
+        for (const stab of stabs) release(stab)
+        stabs.length = 0
+        return
+      }
 
       STAB_DELAYS.forEach((delay, i) => {
         const stab = stabs[i]
         if (!stab) return
 
         setTimeout(() => {
-          if (muted) return
+          // Muted between priming and this stab's turn: nothing to play, but
+          // still something to give back.
+          if (muted) {
+            release(stab)
+            return
+          }
 
           // No currentTime reset: each element is played once, from its own
           // start. Resetting is what made these interrupt one another.
           void stab.play().catch(() => undefined)
 
-          setTimeout(() => {
-            stab.pause()
-            // Drop the buffer rather than leaving a decoded copy of the track
-            // parked for the life of the page.
-            stab.removeAttribute('src')
-            stab.load()
-          }, FIREWORK_MS)
+          setTimeout(() => release(stab), FIREWORK_MS)
         }, delay)
       })
     },

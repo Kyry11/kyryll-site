@@ -102,10 +102,25 @@ if [ -z "$connection" ]; then
 fi
 echo "::add-mask::$connection"
 
-# Only set what is missing. `wrangler secret list` is the check; if it cannot be
-# read, nothing is written, because overwriting a working secret on a bad read
-# is the one outcome worth avoiding here.
-existing=$(cd worker && npx wrangler secret list 2>/dev/null | jq -r '.[]?.name' 2>/dev/null || true)
+# Only set what is missing — which means knowing what is already there.
+#
+# The listing and the parse are checked separately, and a failure of either
+# returns before anything is written. Collapsing them into one pipeline ending
+# in `|| true` looked equivalent and was not: a failed listing produced an empty
+# string, every secret then looked absent, and all three were overwritten. That
+# is the precise opposite of the intent, and it is not free — each write
+# publishes a new version of the Worker.
+if ! listing=$(cd worker && npx wrangler secret list 2>/dev/null); then
+  echo "::warning::Could not list the Worker's secrets, so none were written. Nothing is overwritten on a failed read."
+  exit 0
+fi
+
+if ! existing=$(printf '%s' "$listing" | jq -r '.[]?.name' 2>/dev/null); then
+  echo "::warning::Could not parse the Worker's secret list, so none were written."
+  exit 0
+fi
+
+wrote_all=true
 
 put_secret() {
   local name="$1" value="$2"
@@ -117,6 +132,7 @@ put_secret() {
     echo "  $name set"
   else
     echo "::warning::Could not set the Worker secret $name."
+    wrote_all=false
   fi
 }
 
@@ -124,5 +140,12 @@ put_secret COMMUNICATION_SERVICES_CONNECTION_STRING "$connection"
 put_secret CONTACT_SENDER_ADDRESS "donotreply@$sender_domain"
 put_secret CONTACT_RECIPIENT_ADDRESS "$CONTACT_RECIPIENT_ADDRESS"
 
-echo "Contact form provisioned: sender donotreply@$sender_domain"
+# Only claim success when it is true. A run that failed to write a secret leaves
+# the endpoint answering 500, and saying "provisioned" would send whoever reads
+# the log looking anywhere but here.
+if [ "$wrote_all" = true ]; then
+  echo "Contact form provisioned: sender donotreply@$sender_domain"
+else
+  echo "::warning::The contact form is not fully configured; /api/contact will answer 500 until the missing secrets are set."
+fi
 exit 0

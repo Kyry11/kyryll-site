@@ -106,6 +106,7 @@ cat > "$STUB/npx" <<'STUBEOF'
 # Only `wrangler secret list|put` is used by the deploy scripts.
 if [[ "$*" == *"secret list"* ]]; then
   [ -n "${STUB_SECRET_LIST_FAIL:-}" ] && exit 1
+  [ -n "${STUB_SECRET_LIST_GARBAGE:-}" ] && { echo "<html>not json</html>"; exit 0; }
   echo "${STUB_EXISTING_SECRETS:-[]}"; exit 0
 fi
 if [[ "$*" == *"secret put"* ]]; then
@@ -241,9 +242,34 @@ else
 fi
 
 # A failed read must not cause a working secret to be overwritten.
+#
+# The exit code alone does not show that. An earlier version of this test
+# asserted only that, and the script was overwriting all three: the listing and
+# the parse shared one pipeline ending in `|| true`, so a failed listing gave an
+# empty string, every secret looked absent, and every one was rewritten — each
+# write publishing a new version of the Worker.
 : > "$SECRET_LOG"
-check "writes nothing when the secret list cannot be read" 0 \
+check "survives the secret list failing"             0 \
   env STUB_SECRET_LIST_FAIL=1 STUB_SECRET_LOG="$SECRET_LOG" "$D/provision-email.sh"
+if [ ! -s "$SECRET_LOG" ]; then
+  printf '  ok    %s\n' "and writes nothing when the list cannot be read"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (%s)\n' "and writes nothing when the list cannot be read" "$(tr '\n' ' ' < "$SECRET_LOG")"; fail=$((fail + 1))
+fi
+
+: > "$SECRET_LOG"
+check "survives an unparseable secret list"          0 \
+  env STUB_SECRET_LIST_GARBAGE=1 STUB_SECRET_LOG="$SECRET_LOG" "$D/provision-email.sh"
+if [ ! -s "$SECRET_LOG" ]; then
+  printf '  ok    %s\n' "and writes nothing when the list will not parse"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (%s)\n' "and writes nothing when the list will not parse" "$(tr '\n' ' ' < "$SECRET_LOG")"; fail=$((fail + 1))
+fi
+
+# Reporting success after a failed write sends whoever reads the log looking
+# anywhere but at the thing that broke.
+expect_output "does not claim success when a write fails" "not fully configured" \
+  env STUB_SECRET_PUT_FAIL=1 "$D/provision-email.sh"
 
 check "skips when no recipient is configured"        0 env CONTACT_RECIPIENT_ADDRESS= "$D/provision-email.sh"
 check "skips when the provider is unregistered"      0 env STUB_PROVIDER_STATE=NotRegistered "$D/provision-email.sh"
