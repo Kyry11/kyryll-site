@@ -178,6 +178,9 @@ cat > "$STUB/npx" <<'STUBEOF'
 if [[ "$*" == *"secret list"* ]]; then
   [ -n "${STUB_SECRET_LIST_FAIL:-}" ] && exit 1
   [ -n "${STUB_SECRET_LIST_GARBAGE:-}" ] && { echo "<html>not json</html>"; exit 0; }
+  # Valid JSON that is not an array — the shape jq parses happily and answers
+  # "no" to, which is not the same as the secret being absent.
+  [ -n "${STUB_SECRET_LIST_SHAPE:-}" ] && { echo "$STUB_SECRET_LIST_SHAPE"; exit 0; }
   # Once the delete has happened, the listing reflects it.
   if [ -n "${STUB_SECRET_STATE:-}" ] && [ -f "${STUB_SECRET_STATE}" ]; then
     echo "[]"; exit 0
@@ -594,9 +597,26 @@ expect_output "says so when the secret survives the delete" "still set" \
 check "and does not fail the deploy over it"         0 \
   env STUB_EXISTING_SECRETS="$SHADOWED" STUB_SECRET_DELETE_FAIL=1 "$D/retire-sender-secret.sh"
 
-# An unreadable list is not evidence of absence.
+# An unreadable answer is not evidence of absence — in either of its two forms.
 expect_output "warns rather than claiming success on an unreadable list" "still set" \
   env STUB_SECRET_LIST_FAIL=1 "$D/retire-sender-secret.sh"
+
+# A command that *succeeds* and prints something that is not a JSON array made
+# `jq -e` exit non-zero for a parse error, which reads exactly like "no such
+# secret" — so a malformed listing skipped the deletion and announced the
+# migration had happened.
+expect_output "warns rather than claiming success on malformed output" "still set" \
+  env STUB_SECRET_LIST_GARBAGE=1 "$D/retire-sender-secret.sh"
+check "and does not report a migration that did not happen" 1 \
+  bash -c 'env STUB_SECRET_LIST_GARBAGE=1 '"$D"'/retire-sender-secret.sh | grep -q "has been removed"'
+
+for shape in '"a string"' '42' '{}' 'null'; do
+  if env STUB_SECRET_LIST_SHAPE="$shape" "$D/retire-sender-secret.sh" 2>&1 | grep -q "still set"; then
+    printf '  ok    %s\n' "treats $shape as unreadable, not absent"; pass=$((pass + 1))
+  else
+    printf '  FAIL  %s\n' "treats $shape as unreadable, not absent"; fail=$((fail + 1))
+  fi
+done
 
 echo "custom-sender-domain.sh  (must publish the ownership TXT and nothing else)"
 export ZONE_NAME=kyryll.com EMAIL_SERVICE=kyryll-email

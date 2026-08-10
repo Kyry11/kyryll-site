@@ -19,12 +19,22 @@ set -uo pipefail
 cd "$(dirname "$0")/../../worker" || exit 0
 
 still_present() {
-  # An unreadable list is not evidence of absence, so it is reported as still
+  # An unreadable answer is not evidence of absence, so it is reported as still
   # present — a warning that turns out to be unnecessary costs nothing, and the
   # opposite would claim a migration that had not happened.
+  #
+  # Two ways to be unreadable, and only one used to be handled. A command that
+  # fails is obvious. A command that *succeeds* and prints something that is not
+  # a JSON array — an HTML error page, a bare scalar — made `jq -e` exit
+  # non-zero for a parse error, which reads exactly like "no such secret". So a
+  # malformed listing skipped the deletion and then announced the migration had
+  # happened. Parsing is therefore checked before the question is asked.
   local listing
   listing=$(npx wrangler secret list 2>/dev/null) || return 0
-  printf '%s' "$listing" | jq -e '.[]? | select(.name == "CONTACT_SENDER_ADDRESS")' >/dev/null 2>&1
+
+  printf '%s' "$listing" | jq -e 'type == "array"' >/dev/null 2>&1 || return 0
+
+  printf '%s' "$listing" | jq -e 'any(.[]; .name == "CONTACT_SENDER_ADDRESS")' >/dev/null 2>&1
 }
 
 if ! still_present; then
