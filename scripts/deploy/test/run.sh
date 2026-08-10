@@ -85,7 +85,7 @@ if [[ "$*" == *"provider show"* ]]; then
   echo "${STUB_PROVIDER_STATE:-Registered}"; exit 0
 fi
 if [[ "$*" == *"communication email domain show"* && "$*" != *AzureManagedDomain* ]]; then
-  [ -n "${STUB_CUSTOM_DOMAIN_MISSING:-}" ] && exit 1
+  [ -n "${STUB_CUSTOM_DOMAIN_MISSING:-}" ] && exit 3
   # Azure returns the full name here, as the portal dialog shows.
   STUB_DOMAIN_FQDN="${CONTACT_SENDER_DOMAIN:-kyryll.com}"
   states='{"Domain":{"status":"Verified"},"SPF":{"status":"Verified"},"DKIM":{"status":"Verified"},"DKIM2":{"status":"Verified"},"DMARC":{"status":"Verified"}}'
@@ -105,18 +105,20 @@ JSON
   exit 0
 fi
 if [[ "$*" == *"communication email domain show"* ]]; then
-  [ -n "${STUB_DOMAIN_MISSING:-}" ] && exit 1
+  [ -n "${STUB_DOMAIN_MISSING:-}" ] && exit 3
+  [ -n "${STUB_MANAGED_UNREADABLE:-}" ] && exit 1
   if [[ "$*" == *"fromSenderDomain"* ]]; then echo "abc123.azurecomm.net"; else echo "/subscriptions/x/domains/AzureManagedDomain"; fi
   exit 0
 fi
 if [[ "$*" == *"communication email show"* ]]; then
-  [ -n "${STUB_EMAIL_SVC_MISSING:-}" ] && exit 1
+  [ -n "${STUB_EMAIL_SVC_MISSING:-}" ] && exit 3
+  [ -n "${STUB_EMAIL_SVC_UNREADABLE:-}" ] && exit 1
   echo "exists"; exit 0
 fi
 if [[ "$*" == *"communication show"* ]]; then
-  [ -n "${STUB_COMMS_MISSING:-}" ] && exit 1
-  # The linked-domain query drives whether the sender secret is rewritten, so
-  # it has to answer with an id rather than a placeholder.
+  # The existence probe and the linked-domain query are separate calls and can
+  # fail independently, so the stub keeps them separate too — otherwise one
+  # failure flag stands in for both and each guard is masked by the other.
   if [[ "$*" == *"linkedDomains"* ]]; then
     [ -n "${STUB_LINKED_READ_FAIL:-}" ] && exit 1
     [ -n "${STUB_NO_LINKED_DOMAIN:-}" ] && { echo ""; exit 0; }
@@ -125,6 +127,10 @@ if [[ "$*" == *"communication show"* ]]; then
     fi
     echo "${STUB_LINKED_DOMAIN:-/subscriptions/x/domains/AzureManagedDomain}"; exit 0
   fi
+  # 3 is Azure CLI's not-found; 1 is a genuine failure. Collapsing them is the
+  # bug these cases exist for.
+  [ -n "${STUB_COMMS_MISSING:-}" ] && exit 3
+  [ -n "${STUB_COMMS_UNREADABLE:-}" ] && exit 1
   echo "exists"; exit 0
 fi
 if [[ "$*" == *"communication email domain create"* && "$*" == *"CustomerManaged"* ]]; then
@@ -154,6 +160,7 @@ if [[ "$*" == *"communication list-key"* ]]; then
   echo "endpoint=https://x.communication.azure.com/;accesskey=a2V5"; exit 0
 fi
 if [[ "$*" == *"communication email create"* || "$*" == *"communication email domain create"* || "$*" == *"communication create"* ]]; then
+  [ -n "${STUB_CREATE_LOG:-}" ] && echo "$*" >> "$STUB_CREATE_LOG"
   [ -n "${STUB_CREATE_FAIL:-}" ] && exit 1
   echo "created"; exit 0
 fi
@@ -419,6 +426,50 @@ if [ ! -s "$DELETE_LOG" ] && grep -q '^SENDER_SECRET_SHADOWS_VAR=true$' "$SENDER
 else
   printf '  FAIL  %s (deletes=%s)\n' "and leaves removal to after the variable is deployed" "$(tr '\n' ' ' < "$DELETE_LOG")"; fail=$((fail + 1))
 fi
+
+# An unreadable service is not an absent one. Treating them alike let a
+# transient failure select the managed domain and then relink the service to it
+# — `az communication create --linked-domains` is create-*or-update* — replacing
+# a custom domain linked in the portal.
+: > "$SENDER_ENV"; : > "$LINK_LOG"
+CREATE_LOG="$STUB/creates"; : > "$CREATE_LOG"
+# STUB_DOMAIN_MISSING as well, so the create path is genuinely reachable. Without
+# it the managed domain already exists in the stub, nothing is created either
+# way, and the assertion below cannot tell the guard from its absence.
+check "stops when the service cannot be read"        0 \
+  env GITHUB_ENV="$SENDER_ENV" STUB_COMMS_UNREADABLE=1 STUB_DOMAIN_MISSING=1 \
+      STUB_LINK_LOG="$LINK_LOG" STUB_CREATE_LOG="$CREATE_LOG" "$D/provision-email.sh"
+# Asserting only "exits 0 and writes no sender" proves nothing here: the second
+# probe would stop it anyway, so the first guard could be deleted unnoticed.
+# What distinguishes them is that without the first guard the managed domain is
+# *created* on the way past.
+if [ ! -s "$LINK_LOG" ] && [ ! -s "$SENDER_ENV" ] && [ ! -s "$CREATE_LOG" ]; then
+  printf '  ok    %s\n' "and neither creates nor relinks anything"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (links=%s env=%s creates=%s)\n' "and neither creates nor relinks anything" \
+    "$(tr '\n' ' ' < "$LINK_LOG")" "$(tr '\n' ' ' < "$SENDER_ENV")" "$(tr '\n' ' ' < "$CREATE_LOG")"; fail=$((fail + 1))
+fi
+
+# The second probe, isolated. With a custom sender domain resolved, the managed
+# fallback never runs, so this guard is the only thing that can stop a relink.
+: > "$LINK_LOG"
+check "stops before relinking when the service cannot be read" 0 \
+  env CONTACT_SENDER_DOMAIN=kyryll.com STUB_COMMS_UNREADABLE=1 \
+      STUB_LINK_LOG="$LINK_LOG" "$D/provision-email.sh"
+if [ ! -s "$LINK_LOG" ]; then
+  printf '  ok    %s\n' "and relinks nothing on an unreadable service"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (%s)\n' "and relinks nothing on an unreadable service" "$(tr '\n' ' ' < "$LINK_LOG")"; fail=$((fail + 1))
+fi
+
+check "stops when the email service cannot be read"  0 \
+  env STUB_EMAIL_SVC_UNREADABLE=1 "$D/provision-email.sh"
+expect_output "and says it could not tell"           "Could not determine whether" \
+  env STUB_EMAIL_SVC_UNREADABLE=1 "$D/provision-email.sh"
+
+# A genuine 404 must still take the create path, or nothing would ever be built.
+check "still creates a service that is genuinely absent" 0 \
+  env STUB_COMMS_MISSING=1 "$D/provision-email.sh"
 
 check "stops when nothing at all is linked"          0 \
   env STUB_NO_LINKED_DOMAIN=1 "$D/provision-email.sh"

@@ -199,7 +199,7 @@ that breaks both implementations at once still fails.
 
 ## Configuration
 
-Three secrets. The deploy provisions the Azure resources and sets them on the
+Two secrets. The deploy provisions the Azure resources and sets them on the
 first run — see `scripts/deploy/provision-email.sh` — so the only thing you have
 to supply is where the mail should land, as the `CONTACT_RECIPIENT_ADDRESS`
 repository secret. Without it the provisioning step says so and skips, and the
@@ -213,10 +213,6 @@ npx wrangler secret put COMMUNICATION_SERVICES_CONNECTION_STRING
 ```
 
 ```bash
-npx wrangler secret put CONTACT_SENDER_ADDRESS
-```
-
-```bash
 npx wrangler secret put CONTACT_RECIPIENT_ADDRESS
 ```
 
@@ -225,12 +221,13 @@ npx wrangler secret put CONTACT_RECIPIENT_ADDRESS
 | `COMMUNICATION_SERVICES_CONNECTION_STRING` | From the Azure Communication Services resource |
 | `CONTACT_RECIPIENT_ADDRESS` | Where messages land |
 
-`CONTACT_SENDER_ADDRESS` is not in that list: the deploy publishes it as a
-variable, derived from the linked domain. Setting it by hand as a secret would
-shadow the variable, so the deploy removes such a secret if it finds one.
-
 The recipient is a secret deliberately: it is a real inbox and this repository
 is public.
+
+**Do not set `CONTACT_SENDER_ADDRESS` by hand.** It is not a secret — see below
+— and a secret of that name shadows the variable the deploy publishes, which is
+exactly the failure that stopped mail going out once already. If one exists the
+deploy removes it, after the variable is live.
 
 `CONTACT_SENDER_ADDRESS` is a **variable**, not a secret. It is a public From
 address, so nothing is gained by hiding it and a great deal is lost: a secret

@@ -25,6 +25,27 @@ if [ -z "${CONTACT_RECIPIENT_ADDRESS:-}" ]; then
   exit 0
 fi
 
+# Does an Azure resource exist? 0 yes, 1 no, 2 could not find out.
+#
+# `az ... show` exiting non-zero is not the same as the resource being absent.
+# Azure CLI signals a genuine 404 with exit code 3 and everything else — auth,
+# throttling, a network blip — with 1. Collapsing those into "missing" is how a
+# transient failure ends up creating a Communication Service with
+# --linked-domains, which is create-*or-update*, and replaces a custom domain
+# somebody linked in the portal.
+#
+# Verified against this subscription: absent resource 3, absent resource group
+# 3, existing resource 0, bad subscription 1.
+azure_exists() {
+  local status=0
+  "$@" >/dev/null 2>&1 || status=$?
+  case "$status" in
+    0) return 0 ;;
+    3) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 EMAIL_SERVICE="${EMAIL_SERVICE_NAME:-kyryll-email}"
 COMMS_SERVICE="${COMMS_SERVICE_NAME:-kyryll-comms}"
 DATA_LOCATION="${ACS_DATA_LOCATION:-Australia}"
@@ -38,7 +59,14 @@ if ! az provider show --namespace Microsoft.Communication --query "registrationS
   exit 0
 fi
 
-if ! az communication email show --name "$EMAIL_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP" >/dev/null 2>&1; then
+azure_exists az communication email show --name "$EMAIL_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP"
+email_probe=$?
+if [ "$email_probe" -eq 2 ]; then
+  echo "::warning::Could not determine whether $EMAIL_SERVICE exists; skipping contact-form provisioning."
+  exit 0
+fi
+
+if [ "$email_probe" -eq 1 ]; then
   echo "Creating Email Communication Service $EMAIL_SERVICE"
   az communication email create \
     --name "$EMAIL_SERVICE" \
@@ -82,7 +110,14 @@ if [ -z "$sender_domain" ]; then
   # replacing a custom domain somebody had deliberately linked, because a read
   # timed out.
   existing_link=""
-  if az communication show --name "$COMMS_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP" >/dev/null 2>&1; then
+  azure_exists az communication show --name "$COMMS_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP"
+  probe=$?
+  if [ "$probe" -eq 2 ]; then
+    echo "::warning::Could not determine whether $COMMS_SERVICE exists; leaving the sender configuration alone."
+    exit 0
+  fi
+
+  if [ "$probe" -eq 0 ]; then
     if ! existing_link=$(az communication show --name "$COMMS_SERVICE" \
         --resource-group "$AZURE_RESOURCE_GROUP" --query "linkedDomains" -o tsv 2>/dev/null); then
       echo "::warning::Could not read the linked domains; leaving the sender configuration alone."
@@ -103,8 +138,15 @@ if [ -z "$sender_domain" ]; then
 fi
 
 if [ -z "$sender_domain" ]; then
-  if ! az communication email domain show --domain-name AzureManagedDomain \
-        --email-service-name "$EMAIL_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP" >/dev/null 2>&1; then
+  azure_exists az communication email domain show --domain-name AzureManagedDomain \
+    --email-service-name "$EMAIL_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP"
+  managed_probe=$?
+  if [ "$managed_probe" -eq 2 ]; then
+    echo "::warning::Could not determine whether the managed domain exists; skipping."
+    exit 0
+  fi
+
+  if [ "$managed_probe" -eq 1 ]; then
     echo "Creating the Azure-managed sender domain"
     az communication email domain create \
       --domain-name AzureManagedDomain \
@@ -163,7 +205,14 @@ put_secret() {
   return 1
 }
 
-if ! az communication show --name "$COMMS_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP" >/dev/null 2>&1; then
+azure_exists az communication show --name "$COMMS_SERVICE" --resource-group "$AZURE_RESOURCE_GROUP"
+comms_probe=$?
+if [ "$comms_probe" -eq 2 ]; then
+  echo "::warning::Could not determine whether $COMMS_SERVICE exists; not creating or relinking anything."
+  exit 0
+fi
+
+if [ "$comms_probe" -eq 1 ]; then
   echo "Creating Communication Service $COMMS_SERVICE"
   az communication create \
     --name "$COMMS_SERVICE" \

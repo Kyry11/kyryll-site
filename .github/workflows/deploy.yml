@@ -451,15 +451,21 @@ jobs:
           # rewritten from Azure's actual linked domain on every deploy and
           # cannot go stale.
           #
-          # --keep-vars because wrangler deletes plain variables the deployment
-          # does not mention. Without it, a run where provisioning could not
-          # produce a sender — a transient Azure failure, an unreadable secret
-          # list — would deploy without CONTACT_SENDER_ADDRESS and remove the
-          # working one, turning a contact form that was fine into a 500 until
-          # some later deploy happened to succeed. A deploy should not delete
-          # configuration it merely failed to compute.
+          # --keep-vars only on the branch that could not work the sender out.
+          #
+          # wrangler deletes plain variables a deployment does not mention, so
+          # without it a run that failed to resolve a sender — a transient Azure
+          # failure, an unreadable secret list — would remove the working one and
+          # turn a contact form that was fine into a 500. A deploy should not
+          # delete configuration it merely failed to compute.
+          #
+          # But keeping every variable is not a free hedge: it also preserves
+          # ones that should not survive. ALLOW_LOCALHOST_ORIGIN is the sharp
+          # example — it relaxes the tracking route's origin check and must never
+          # exist in production, so a deploy that can name every variable it
+          # wants should be free to remove the rest.
           if [ -n "${SENDER_ADDRESS:-}" ]; then
-            npx wrangler deploy --keep-vars \
+            npx wrangler deploy \
               --var "ORIGIN:$STORAGE_ENDPOINT" \
               --var "CONTACT_SENDER_ADDRESS:$SENDER_ADDRESS"
           else
