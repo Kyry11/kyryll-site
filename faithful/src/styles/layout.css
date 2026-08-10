@@ -83,8 +83,11 @@
   width: 100%;
   height: var(--stage-height);
   background-color: #000;
-  background-image: url('/img/bg-clouds.png');
-  background-repeat: repeat;
+  /*
+   * The cloud image moved onto .cloud-band elements built by scenes.ts. One
+   * repeating background shares a single background-position across every
+   * tile, so alternate rows could never drift in opposite directions.
+   */
   /* The original used background-attachment: fixed and moved
      background-position on every scroll event. That forces a full-layer
      repaint per frame; translating a scrolling layer on the compositor does
@@ -586,4 +589,50 @@ ul.services li:hover {
 .visitus a:hover img {
   transform: translateY(-2px);
   opacity: 1;
+}
+
+
+/* ---- cloud layer -------------------------------------------------------- */
+
+/*
+ * The wrapper the vertical parallax translates. Its children carry the
+ * horizontal drift, so the two motions never contend for one transform.
+ */
+.cloud-layer {
+  position: absolute;
+  inset: 0;
+  will-change: transform;
+}
+
+/*
+ * One band per tile row. Three tiles wide and offset by one, so there is always
+ * cloud either side of the viewport and the drift never exposes an edge.
+ */
+.cloud-band {
+  position: absolute;
+  left: calc(-1 * var(--tile-width));
+  width: calc(3 * var(--tile-width));
+  height: 500px;
+  background-image: url('/img/bg-clouds.png');
+  background-repeat: repeat-x;
+  will-change: transform;
+  animation-name: cloud-drift;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+/*
+ * Exactly one tile width, which is what makes the loop seamless: at the end of
+ * the cycle the band is showing the next tile along, pixel for pixel.
+ */
+@keyframes cloud-drift {
+  from { transform: translateX(0); }
+  to   { transform: translateX(calc(-1 * var(--tile-width))); }
+}
+
+/* Wind is motion for its own sake, which is exactly what this asks to stop. */
+@media (prefers-reduced-motion: reduce) {
+  .cloud-band {
+    animation: none;
+  }
 }

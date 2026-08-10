@@ -1,5 +1,5 @@
 /*
- * The ambient track — "odessa", the same recording the 2012 site played.
+ * Sound: the ambient track, and the fireworks.
  *
  * The original used Howler 2.0.0 with a sprite map:
  *
@@ -7,15 +7,19 @@
  *   firework: [0,   1900]
  *   full:     [0, 300015]
  *
- * All three start at 0, so they are the same audio played for different
- * durations: a tick, a 1.9 s stab under each firework, and the full
- * five-minute track. Two <audio> elements reproduce that without the library.
+ * All three start at 0, so they are the same recording played for different
+ * durations — including the "firework", which was the track's own opening bar.
+ * That was never a bang: measured off the file it averages -21 dBFS and decays
+ * to -31 by 1.75 s, so layering four of them reads as music starting rather
+ * than a shell going off. The reports are synthesised here instead, which needs
+ * no asset and sounds like what it is meant to be.
  *
  * Sequencing, which is the part that matters:
  *
- *   cold open      the file is fetched and decoded, so it is ready on time
- *   fireworks      short stabs under the first four bursts
- *   display ends   the track proper begins
+ *   cold open      the track is fetched and decoded, so it is ready on time
+ *   fireworks      one report per burst, for as long as the display runs
+ *   the finale     the track proper begins, a few seconds before the last
+ *                  shells burn out, so the music arrives under them
  *
  * The original called .play() during load and expected it to work. Every
  * browser has blocked unprompted playback since 2017, so it has silently not
@@ -28,25 +32,14 @@
  * gesture has already happened long before the music is due.
  */
 
-import { isNarrow, prefersReducedMotion } from './dom'
-
-const FIREWORK_MS = 1900
+import { isNarrow } from './dom'
 
 /*
- * When each stab fires, relative to the display starting. The original's
- * timings, unchanged.
+ * Well under the bed's 0.55. Sixty of these go off across the display and
+ * several overlap at any moment, so each has to sit low enough that a cluster
+ * is a rumble rather than a wall.
  */
-const STAB_DELAYS = [0, 1000, 1300, 1800] as const
-
-/*
- * Louder than the bed, because the sprite is quieter than the music.
- *
- * The stabs play the track's first 1.9 s — that is what Howler's
- * `firework: [0, 1900]` sprite was. Measured, that opening averages -21.2 dBFS
- * against -13.1 for the body of the track, and it decays to -31 dB by 1.75 s.
- * At the bed's own 0.55 it is barely there.
- */
-const STAB_VOLUME = 0.7
+const EXPLOSION_VOLUME = 0.16
 
 /*
  * Deliberately not the key the earlier build used ('kyryll:sound'). That one
@@ -59,9 +52,9 @@ const PREF_KEY = 'kyryll:muted'
 export interface Audio {
   /** Fetch and decode during the cold open, so the track is ready on cue. */
   prime(): void
-  /** Short stabs under the opening bursts. */
-  playFireworkStabs(): void
-  /** Start the track proper. Called when the firework display finishes. */
+  /** One report, played as a shell bursts. */
+  playExplosion(): void
+  /** Start the track proper. */
   startTrack(): void
 }
 
@@ -86,44 +79,40 @@ export function createAudio(): Audio {
   let armed = false
 
   /*
-   * One element per stab, built and buffered during the cold open.
+   * The reports are synthesised: a filtered noise burst with a fast decay,
+   * which is what a firework sounds like from across a harbour.
    *
-   * Both halves of that matter, and the previous arrangement got both wrong.
-   * It created a single element at the moment the display started and replayed
-   * it by resetting currentTime, which meant the four stabs interrupted each
-   * other instead of layering — and, worse, the element never buffered: live,
-   * the first stab fired at readyState 0 and the rest at 1, so play() resolved
-   * (playback *began*) while there was no decoded audio to emit. Restarting it
-   * every 300 ms is what stopped it ever getting any. Nothing was audible.
-   *
-   * Separate elements can overlap, which is what Howler did with a sprite, and
-   * loading them alongside the bed gives them the whole cold open to buffer.
-   * They share one URL, so the browser fetches it once and serves the rest from
-   * cache.
+   * One shared noise buffer covers every shell — only playback rate, filter
+   * sweep and level vary — so sixty bursts cost sixty gain nodes rather than
+   * sixty downloads. The previous arrangement preloaded four copies of a
+   * five-minute track for four sounds nobody could hear.
    */
-  const stabs: HTMLAudioElement[] = []
+  let ac: AudioContext | null = null
+  let noise: AudioBuffer | null = null
 
-  /**
-   * Hands a stab's buffer back. Safe to call twice.
-   *
-   * Defined out here rather than inside playFireworkStabs() because muting has
-   * to reach them too, and because the display is not the only thing that
-   * decides they are finished with.
-   */
-  const releaseStab = (stab: HTMLAudioElement): void => {
-    stab.pause()
-    stab.removeAttribute('src')
-    stab.load()
-  }
+  function audioContext(): AudioContext | null {
+    if (muted) return null
 
-  const releaseAllStabs = (): void => {
-    for (const stab of stabs) releaseStab(stab)
-    stabs.length = 0
+    try {
+      const Ctor =
+        window.AudioContext ??
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+      if (!Ctor) return null
+      ac ??= new Ctor()
+    } catch {
+      return null
+    }
+
+    // The same autoplay policy the bed faces: suspended until a gesture.
+    // Asking to resume is free and silently ignored if it is refused.
+    if (ac.state === 'suspended') void ac.resume()
+
+    return ac
   }
 
   /*
    * The control reflects *intent*, not whether audio happens to be coming out
-   * right now. The track is not due until the firework display ends, and a
+   * right now. The track is not due until the display is nearly over, and a
    * button that reads "off" for the first thirteen seconds — then flips on its
    * own — describes the machine rather than the choice.
    */
@@ -184,24 +173,17 @@ export function createAudio(): Audio {
       playing = false
 
       /*
-       * And the stabs, which pausing the bed does not touch.
-       *
-       * A stab already past play() went on sounding for up to 1.9 s after the
-       * control said the sound was off — future ones were suppressed, but the
-       * one you could hear was not, which is the only one that matters to
-       * somebody pressing mute. Releasing rather than pausing is deliberate:
-       * it silences what is playing and gives back four buffered copies of a
-       * five-minute track at the same time.
-       *
-       * It is one-way. Un-muting during the ~13 s before the display gets the
-       * track but not the stabs, which is a fair trade for not holding the
-       * memory of somebody who asked for silence.
+       * And the fireworks, which pausing the bed does not touch. Suspending the
+       * context silences anything mid-decay as well as everything after it —
+       * a report already sounding is the only one that matters to somebody who
+       * has just pressed mute.
        */
-      releaseAllStabs()
+      if (ac && ac.state === 'running') void ac.suspend()
     } else {
       // Deliberately does not set `wantsTrack`. Un-muting says "let me hear
       // it", not "skip the cue" — if the display is still running, the track
       // still waits for it.
+      if (ac && ac.state === 'suspended') void ac.resume()
       tryStart()
     }
 
@@ -269,65 +251,51 @@ export function createAudio(): Audio {
       } catch {
         // Nothing to do — playback will simply buffer later instead.
       }
-
-      /*
-       * Not under reduced motion. There is no firework display on that path, so
-       * playFireworkStabs() is never called — and it holds the only cleanup, so
-       * four buffered copies of the track stayed attached for the life of the
-       * page for exactly the visitors who asked for less. The bed is still
-       * primed: a motion preference says nothing about sound.
-       */
-      if (prefersReducedMotion()) return
-
-      for (const _ of STAB_DELAYS) {
-        const stab = new window.Audio()
-        stab.src = bed.src
-        stab.volume = STAB_VOLUME
-        stab.preload = 'auto'
-        try {
-          stab.load()
-        } catch {
-          // As above.
-        }
-        stabs.push(stab)
-      }
     },
 
-    playFireworkStabs(): void {
-      /*
-       * Releasing is unconditional, and that is the point.
-       *
-       * Each of these holds a buffered copy of a five-minute track, loaded
-       * during the cold open so it is ready on cue. Both mute paths used to
-       * return without releasing anything — muted before the display, and muted
-       * during it — so a visitor who turned the sound off kept four of them
-       * attached for the life of the page. The one path that did release was
-       * the one where they had already played.
-       */
-      if (muted) {
-        releaseAllStabs()
-        return
+    playExplosion(): void {
+      if (muted) return
+
+      const ctx = audioContext()
+      // Before the first gesture the context is suspended, and scheduling into
+      // a suspended context queues everything to fire at once when it resumes.
+      if (!ctx || ctx.state !== 'running') return
+
+      if (!noise) {
+        // Two seconds of white noise, generated once. Long enough that varying
+        // the playback rate never runs off the end.
+        const frames = Math.floor(ctx.sampleRate * 2)
+        noise = ctx.createBuffer(1, frames, ctx.sampleRate)
+        const data = noise.getChannelData(0)
+        for (let i = 0; i < frames; i++) data[i] = Math.random() * 2 - 1
       }
 
-      STAB_DELAYS.forEach((delay, i) => {
-        const stab = stabs[i]
-        if (!stab) return
+      const now = ctx.currentTime
+      const length = 0.45 + Math.random() * 0.35
 
-        setTimeout(() => {
-          // Muted between priming and this stab's turn: nothing to play, but
-          // still something to give back.
-          if (muted) {
-            releaseStab(stab)
-            return
-          }
+      const source = ctx.createBufferSource()
+      source.buffer = noise
+      source.playbackRate.value = 0.7 + Math.random() * 0.6
 
-          // No currentTime reset: each element is played once, from its own
-          // start. Resetting is what made these interrupt one another.
-          void stab.play().catch(() => undefined)
+      /*
+       * The downward sweep is what makes it read as distance rather than
+       * static. A real report arrives as a crack that loses its top end almost
+       * at once; holding the filter open just sounds like tape hiss.
+       */
+      const filter = ctx.createBiquadFilter()
+      filter.type = 'lowpass'
+      filter.frequency.setValueAtTime(1400 + Math.random() * 1200, now)
+      filter.frequency.exponentialRampToValueAtTime(140, now + length)
 
-          setTimeout(() => releaseStab(stab), FIREWORK_MS)
-        }, delay)
-      })
+      const gain = ctx.createGain()
+      const peak = EXPLOSION_VOLUME * (0.6 + Math.random() * 0.4)
+      gain.gain.setValueAtTime(0.0001, now)
+      gain.gain.exponentialRampToValueAtTime(peak, now + 0.012)
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + length)
+
+      source.connect(filter).connect(gain).connect(ctx.destination)
+      source.start(now)
+      source.stop(now + length + 0.05)
     },
 
     startTrack(): void {
