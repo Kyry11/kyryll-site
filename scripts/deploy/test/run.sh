@@ -178,11 +178,27 @@ cat > "$STUB/npx" <<'STUBEOF'
 if [[ "$*" == *"secret list"* ]]; then
   [ -n "${STUB_SECRET_LIST_FAIL:-}" ] && exit 1
   [ -n "${STUB_SECRET_LIST_GARBAGE:-}" ] && { echo "<html>not json</html>"; exit 0; }
+  # Once the delete has happened, the listing reflects it.
+  if [ -n "${STUB_SECRET_STATE:-}" ] && [ -f "${STUB_SECRET_STATE}" ]; then
+    echo "[]"; exit 0
+  fi
   echo "${STUB_EXISTING_SECRETS:-[]}"; exit 0
 fi
 if [[ "$*" == *"secret delete"* ]]; then
+  # Validated the way wrangler validates it. The stub used to accept anything,
+  # which is why `--force` — a flag wrangler does not have, and rejects the
+  # whole invocation over — passed every test and failed on every real run.
+  for arg in "$@"; do
+    case "$arg" in
+      wrangler|secret|delete|--name|--cwd) ;;
+      --*) echo "✘ [ERROR] Unknown argument: ${arg#--}" >&2; exit 1 ;;
+      *) ;;
+    esac
+  done
   [ -n "${STUB_SECRET_DELETE_FAIL:-}" ] && exit 1
-  [ -n "${STUB_SECRET_DELETE_LOG:-}" ] && echo "${@: -2:1}" >> "$STUB_SECRET_DELETE_LOG"
+  [ -n "${STUB_SECRET_DELETE_LOG:-}" ] && echo "${@: -1}" >> "$STUB_SECRET_DELETE_LOG"
+  # The secret is gone from here on, which is what the verification reads back.
+  [ -n "${STUB_SECRET_STATE:-}" ] && : > "$STUB_SECRET_STATE"
   exit 0
 fi
 if [[ "$*" == *"secret put"* ]]; then
@@ -298,7 +314,7 @@ echo "provision-email.sh  (never fatal: the site works without a contact form)"
 export CONTACT_RECIPIENT_ADDRESS=inbox@example.test
 SECRET_LOG="$STUB/secrets"; : > "$SECRET_LOG"
 
-check "provisions and sets all three secrets"        0 \
+check "provisions and sets the secrets it owns"       0 \
   env STUB_SECRET_LOG="$SECRET_LOG" "$D/provision-email.sh"
 # Two secrets, not three: the sender is a variable now, so it cannot be one
 # deploy behind the domain it names.
@@ -544,6 +560,43 @@ fi
 # The managed domain can be removed on purpose once a custom one works.
 expect_output "uses the already linked domain instead of recreating a deleted one" "Using the already linked sender domain" \
   env STUB_DOMAIN_MISSING=1 "$D/provision-email.sh"
+
+echo "retire-sender-secret.sh  (the secret shadows the variable until it goes)"
+SECRET_STATE="$STUB/secretstate"; rm -f "$SECRET_STATE"
+: > "$DELETE_LOG"
+
+SHADOWED='[{"name":"CONTACT_SENDER_ADDRESS"}]'
+
+check "removes the shadowing secret"                 0 \
+  env STUB_EXISTING_SECRETS="$SHADOWED" STUB_SECRET_STATE="$SECRET_STATE" \
+      STUB_SECRET_DELETE_LOG="$DELETE_LOG" "$D/retire-sender-secret.sh"
+if grep -qx CONTACT_SENDER_ADDRESS "$DELETE_LOG"; then
+  printf '  ok    %s\n' "and deletes it by name"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s (%s)\n' "and deletes it by name" "$(tr '\n' ' ' < "$DELETE_LOG")"; fail=$((fail + 1))
+fi
+expect_output "and confirms the migration" "the shadowing secret has been removed" \
+  env STUB_EXISTING_SECRETS="$SHADOWED" STUB_SECRET_STATE="$STUB/s2" "$D/retire-sender-secret.sh"
+
+rm -f "$SECRET_STATE"; : > "$DELETE_LOG"
+check "does nothing when there is no such secret"    0 \
+  env STUB_SECRET_DELETE_LOG="$DELETE_LOG" "$D/retire-sender-secret.sh"
+if [ ! -s "$DELETE_LOG" ]; then
+  printf '  ok    %s\n' "and issues no delete"; pass=$((pass + 1))
+else
+  printf '  FAIL  %s\n' "and issues no delete"; fail=$((fail + 1))
+fi
+
+# The failure the previous version had: a delete that never ran, reported as a
+# warning nobody read, leaving the sender stale for ever.
+expect_output "says so when the secret survives the delete" "still set" \
+  env STUB_EXISTING_SECRETS="$SHADOWED" STUB_SECRET_DELETE_FAIL=1 "$D/retire-sender-secret.sh"
+check "and does not fail the deploy over it"         0 \
+  env STUB_EXISTING_SECRETS="$SHADOWED" STUB_SECRET_DELETE_FAIL=1 "$D/retire-sender-secret.sh"
+
+# An unreadable list is not evidence of absence.
+expect_output "warns rather than claiming success on an unreadable list" "still set" \
+  env STUB_SECRET_LIST_FAIL=1 "$D/retire-sender-secret.sh"
 
 echo "custom-sender-domain.sh  (must publish the ownership TXT and nothing else)"
 export ZONE_NAME=kyryll.com EMAIL_SERVICE=kyryll-email

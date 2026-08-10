@@ -483,14 +483,7 @@ jobs:
       # costs is one deploy still using the old address.
       - name: Retire the shadowing sender secret
         if: ${{ env.SENDER_SECRET_SHADOWS_VAR == 'true' && env.SENDER_ADDRESS != '' }}
-        working-directory: worker
-        run: |
-          set -uo pipefail
-          if npx wrangler secret delete CONTACT_SENDER_ADDRESS --force >/dev/null 2>&1; then
-            echo "CONTACT_SENDER_ADDRESS is a variable now; the shadowing secret has been removed."
-          else
-            echo "::warning::Could not remove the CONTACT_SENDER_ADDRESS secret. It shadows the variable, so the sender will stay on the old value until it is deleted."
-          fi
+        run: scripts/deploy/retire-sender-secret.sh
 
       # The Worker's own responses are not cached by Cloudflare, but the
       # subrequests to storage are — index.html for 60s, assets for a year. A
