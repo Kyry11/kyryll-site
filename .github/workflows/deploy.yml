@@ -447,7 +447,43 @@ jobs:
           #
           # ORIGIN is passed as --var, which overrides [vars] and needs no
           # escaping, keeping a URL out of any textual substitution.
-          npx wrangler deploy --var "ORIGIN:$STORAGE_ENDPOINT"
+          # The sender travels as a variable rather than a secret so it is
+          # rewritten from Azure's actual linked domain on every deploy and
+          # cannot go stale.
+          #
+          # --keep-vars only on the branch that could not work the sender out.
+          #
+          # wrangler deletes plain variables a deployment does not mention, so
+          # without it a run that failed to resolve a sender — a transient Azure
+          # failure, an unreadable secret list — would remove the working one and
+          # turn a contact form that was fine into a 500. A deploy should not
+          # delete configuration it merely failed to compute.
+          #
+          # But keeping every variable is not a free hedge: it also preserves
+          # ones that should not survive. ALLOW_LOCALHOST_ORIGIN is the sharp
+          # example — it relaxes the tracking route's origin check and must never
+          # exist in production, so a deploy that can name every variable it
+          # wants should be free to remove the rest.
+          if [ -n "${SENDER_ADDRESS:-}" ]; then
+            npx wrangler deploy \
+              --var "ORIGIN:$STORAGE_ENDPOINT" \
+              --var "CONTACT_SENDER_ADDRESS:$SENDER_ADDRESS"
+          else
+            echo "::warning::No sender address was resolved; deploying without changing the existing one."
+            npx wrangler deploy --keep-vars --var "ORIGIN:$STORAGE_ENDPOINT"
+          fi
+
+      # Only now that the variable is live.
+      #
+      # `wrangler secret delete` publishes a new version immediately, so doing
+      # this during provisioning — before the upload, the prune and the deploy
+      # that carries the replacement — left the Worker with no sender at all for
+      # the length of those steps, and permanently if any of them failed. The
+      # secret shadows the variable until it goes, so the worst this ordering
+      # costs is one deploy still using the old address.
+      - name: Retire the shadowing sender secret
+        if: ${{ env.SENDER_SECRET_SHADOWS_VAR == 'true' && env.SENDER_ADDRESS != '' }}
+        run: scripts/deploy/retire-sender-secret.sh
 
       # The Worker's own responses are not cached by Cloudflare, but the
       # subrequests to storage are — index.html for 60s, assets for a year. A

@@ -199,7 +199,7 @@ that breaks both implementations at once still fails.
 
 ## Configuration
 
-Three secrets. The deploy provisions the Azure resources and sets them on the
+Two secrets. The deploy provisions the Azure resources and sets them on the
 first run — see `scripts/deploy/provision-email.sh` — so the only thing you have
 to supply is where the mail should land, as the `CONTACT_RECIPIENT_ADDRESS`
 repository secret. Without it the provisioning step says so and skips, and the
@@ -213,23 +213,41 @@ npx wrangler secret put COMMUNICATION_SERVICES_CONNECTION_STRING
 ```
 
 ```bash
-npx wrangler secret put CONTACT_SENDER_ADDRESS
-```
-
-```bash
 npx wrangler secret put CONTACT_RECIPIENT_ADDRESS
 ```
 
 | Secret | Value |
 |---|---|
 | `COMMUNICATION_SERVICES_CONNECTION_STRING` | From the Azure Communication Services resource |
-| `CONTACT_SENDER_ADDRESS` | Verified sender, e.g. `donotreply@<your-domain>` |
 | `CONTACT_RECIPIENT_ADDRESS` | Where messages land |
 
 The recipient is a secret deliberately: it is a real inbox and this repository
 is public.
 
-`ORIGIN` is not a secret, but it is not known until the storage account exists,
+**Do not set `CONTACT_SENDER_ADDRESS` by hand.** It is not a secret — see below
+— and a secret of that name shadows the variable the deploy publishes, which is
+exactly the failure that stopped mail going out once already. If one exists the
+deploy removes it, after the variable is live.
+
+`CONTACT_SENDER_ADDRESS` is a **variable**, not a secret. It is a public From
+address, so nothing is gained by hiding it and a great deal is lost: a secret
+cannot be read back, so the deploy could only guess whether it was current — and
+it guessed by watching for changes it made itself. Change the linked domain in
+the Azure portal instead and the link looks correct, nothing appears to have
+changed, and the Worker goes on naming a domain that no longer exists. Every
+send fails and no redeploy repairs it. As a variable it is rewritten on every
+deploy from whatever Azure reports is linked, including the local part, which is
+read from the domain's registered sender usernames rather than assumed to be
+`donotreply`.
+
+Every read behind that is fail-stop. A read that fails is not treated as
+evidence that nothing is linked, and an unreadable or empty list of sender
+usernames is not treated as evidence that `donotreply` is valid — in both cases
+the deploy leaves the existing configuration alone rather than publishing a
+guess. The deploy also passes `--keep-vars`, so a run that could not work the
+sender out does not delete the one that was working.
+
+`ORIGIN` is not a secret either, and is not known until the storage account exists,
 so `wrangler.toml` carries a placeholder and both the deploy and `npm run dev`
 pass the real value as `--var`. The rate limiter needs no id at all — a Durable
 Object is addressed by class name — so nothing is substituted into that file.
