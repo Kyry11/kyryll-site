@@ -19,19 +19,51 @@ const TILE_HEIGHT = 500
 const TILE_WIDTH = 1650
 
 /*
+ * How far down the stack the band pattern repeats.
+ *
+ * Direction alternates every band and the drift speed cycles every three, so
+ * band i and band i + 6 are identical in every respect: same direction, same
+ * duration, and — since they all start together — the same phase. Six bands is
+ * therefore the shortest distance the layer can be shifted by without anything
+ * changing on screen, which is the property the wrap below needs.
+ */
+const PATTERN_BANDS = 6
+const WRAP_HEIGHT = PATTERN_BANDS * TILE_HEIGHT
+
+/*
  * How many bands of cloud to build.
  *
- * The layer is as tall as the whole stage — four scenes of 1000px, plus room —
- * so this covers it with a couple to spare. Cheap: each band is one element
+ * Enough to cover the stage at both ends of the wrap. The stage is 4000px and
+ * the layer sits between 0 and one wrap height above it, so the stack has to
+ * span 4000 + 3000 for the bottom of the last scene to still have cloud over
+ * it at the moment the offset is furthest up. Cheap: each band is one element
  * with a repeating background and a compositor-driven transform.
  */
-const CLOUD_BANDS = 10
+const CLOUD_BANDS = 14
 
-/** Scroll-to-drift ratio. Below 1 the clouds lag behind the page. */
+/** Scroll-to-drift ratio. Below 1 the clouds outrun the page. */
 const SPEED_RATIO = 0.4
 
+/*
+ * Where the layer sits for a given scroll position.
+ *
+ * The wrap used to be `% (TILE_HEIGHT + 1)`, straight from the 2012 code, and
+ * it was harmless there: every row of cloud was one repeating background, so
+ * shifting the layer by a tile height put an indistinguishable row in each
+ * row's place. The rows are no longer indistinguishable. Each drifts its own
+ * way at its own rate, so a one-tile shift swaps every row for a differently
+ * offset one — a visible jump, and there are fifteen of them across the stage,
+ * five inside every scene change.
+ *
+ * Wrapping on the pattern's own period instead makes the shift a genuine
+ * no-op: band i lands exactly where band i + 6 was, showing the same pixels.
+ *
+ * Fractional, where the original floored. Scene changes are eased tweens that
+ * move the page by well under a pixel per frame at each end, and rounding the
+ * offset there turns the arrival into a series of small steps.
+ */
 function cloudOffset(scrollPosition: number): number {
-  return TILE_HEIGHT - (Math.floor(scrollPosition / SPEED_RATIO) % (TILE_HEIGHT + 1))
+  return -((scrollPosition / SPEED_RATIO) % WRAP_HEIGHT)
 }
 
 /**
@@ -98,7 +130,7 @@ function buildCloudBands(clouds: HTMLElement): HTMLElement {
      * a mechanism.
      */
     band.style.animationDirection = i % 2 === 0 ? 'normal' : 'reverse'
-    band.style.animationDuration = `${180 + (i % 3) * 40}s`
+    band.style.animationDuration = `${90 + (i % 3) * 20}s`
 
     layer.appendChild(band)
   }

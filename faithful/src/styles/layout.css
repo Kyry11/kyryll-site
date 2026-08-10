@@ -93,7 +93,14 @@
      repaint per frame; translating a scrolling layer on the compositor does
      the same thing for free. See scenes.ts. */
   background-attachment: scroll;
-  will-change: background-position;
+  /*
+   * The band stack is deliberately taller than the stage — it has to be, to
+   * still cover the last scene when the parallax has carried it a full wrap
+   * height up. Clipping it here costs nothing, because the viewport never
+   * shows anything outside the stage anyway, and it keeps three thousand
+   * pixels of cloud from contributing scrollable overflow to the document.
+   */
+  overflow: hidden;
   z-index: 15;
   pointer-events: none;
 }
