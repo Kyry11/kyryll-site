@@ -333,26 +333,72 @@ function settled(anim: Animation, duration: number): Promise<void> {
 }
 
 function flyAway(face: HTMLElement): Promise<void> {
+  /*
+   * The envelope is handed to the page before it flies.
+   *
+   * It used to fly where it was folded, inside #contactform — which sets
+   * `perspective: 250px`, a viewing distance shorter than the form is wide, so
+   * every rotation past a few degrees sheared it into a wedge. And the
+   * scroll-locked body clips at the viewport, so a flight that reached
+   * x = 1600px from a form near the left edge simply disappeared and never
+   * visibly came back. Fixed positioning on the body gives it the whole screen,
+   * its own gentler perspective, and coordinates that mean what they say.
+   */
+  const box = face.getBoundingClientRect()
+
+  face.remove()
+  Object.assign(face.style, {
+    position: 'fixed',
+    left: `${box.left}px`,
+    top: `${box.top}px`,
+    width: `${box.width}px`,
+    height: `${box.height}px`,
+    margin: '0',
+    zIndex: '400',
+    pointerEvents: 'none',
+  } satisfies Partial<CSSStyleDeclaration>)
+  document.body.appendChild(face)
+
+  const w = document.documentElement.clientWidth || window.innerWidth
+  const h = document.documentElement.clientHeight || window.innerHeight
+
+  const at = (x: number, y: number, rx: number, ry: number, rz: number, scale = 1): string =>
+    `perspective(900px) translate(${x}px, ${y}px) rotateX(${rx}deg) rotateY(${ry}deg) rotateZ(${rz}deg) scale(${scale})`
+
+  /*
+   * Out of view and back, which is the part that was missing.
+   *
+   * The two frames either side of 0.52 are the same offset to within a
+   * thousandth: the envelope is off the right edge for both, so the jump across
+   * to the left edge costs no visible frame. Sliding between them instead would
+   * drag it backwards across the screen, which is not the same effect at all.
+   */
   const frames = [
-    { x: 100,             y: 100,             rx: 0,             ry: 0 },
-    { x: 500,             y: -50,             rx: rand(-30, 30), ry: rand(-5, 5) },
-    { x: rand(420, 560),  y: rand(0, 100),    rx: rand(-5, 5),   ry: rand(-10, 10) },
-    { x: 400,             y: -50,             rx: rand(-25, 25), ry: rand(-10, 10) },
-    { x: 300,             y: -70,             rx: rand(-5, 5),   ry: rand(-5, 5) },
-    { x: 400,             y: -100,            rx: rand(-15, 15), ry: rand(-5, 5) },
-    { x: 1600,            y: rand(-300, 1200), rx: 5,            ry: 10 },
+    { offset: 0,      transform: at(0, 0, 0, 0, 0, 1) },
+    { offset: 0.08,   transform: at(-0.04 * w, -0.10 * h, 8, -10, -6, 1.06) },
+    { offset: 0.20,   transform: at(0.22 * w, -0.26 * h, -6, 16, 12, 0.98) },
+    { offset: 0.32,   transform: at(0.52 * w, -0.06 * h, 10, -12, -8, 0.92) },
+    { offset: 0.44,   transform: at(1.35 * w, -0.20 * h, 0, 24, 18, 0.82) },
+    { offset: 0.52,   transform: at(1.45 * w, -0.24 * h, 0, 24, 18, 0.80) },
+    { offset: 0.5201, transform: at(-1.45 * w, 0.16 * h, 0, -24, -16, 0.80) },
+    { offset: 0.66,   transform: at(-0.35 * w, 0.06 * h, -8, -10, -10, 0.95) },
+    { offset: 0.78,   transform: at(0.06 * w, -0.14 * h, 6, 12, 8, 1) },
+    { offset: 0.90,   transform: at(0.38 * w, -0.34 * h, -4, 18, 16, 0.72) },
+    { offset: 1,      transform: at(0.95 * w, -0.62 * h, 0, 26, 24, 0.28), opacity: 0.85 },
   ]
 
-  face.style.transformOrigin = '50% 50%'
+  /*
+   * Seven to fifteen seconds was the old range, and the long end outstayed its
+   * welcome badly — the form is gone and there is nothing to do but watch. This
+   * is enough for the arc to read: away, a beat out of sight, back across, gone.
+   */
+  const duration = 6800
 
-  const duration = rand(7, 15) * 1000
-
-  const anim = face.animate(
-    frames.map((f) => ({
-      transform: `translate(${f.x}px, ${f.y}px) rotateX(${f.rx}deg) rotateY(${f.ry}deg)`,
-    })),
-    { duration, easing: 'ease-in-out', fill: 'forwards' },
-  )
+  const anim = face.animate(frames, {
+    duration,
+    easing: 'cubic-bezier(0.45, 0.05, 0.55, 0.95)',
+    fill: 'forwards',
+  })
 
   return settled(anim, duration)
 }

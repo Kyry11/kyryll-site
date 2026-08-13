@@ -93,13 +93,23 @@ async function revealMainContent(audio: ReturnType<typeof createAudio>): Promise
      * quiet, and this only ever fires into a track that is already playing.
      */
     void import('./modules/fireworks')
-      .then(({ startFireworks }) => startFireworks(() => audio.startTrack()))
+      .then(({ startFireworks }) =>
+        startFireworks(
+          // Still a backstop: if the finale hook never runs — a chunk that
+          // half-loaded, a display that never scheduled — the track still
+          // starts when the sky empties.
+          () => audio.startTrack(),
+          {
+            onBurst: () => audio.playExplosion(),
+            onFinale: () => audio.startTrack(),
+          },
+        ),
+      )
       .catch((error: unknown) => {
         console.error('kyryll.com: fireworks failed to load', error)
         audio.startTrack()
       })
 
-    audio.playFireworkStabs()
     void wait(25_000).then(() => audio.startTrack())
   }
 

@@ -106,7 +106,10 @@ const CITY_OFFSET_X = 500
  */
 const SETTLE_FRAMES = 90
 
-export function startFireworks(onDisplayEnd?: () => void): () => void {
+export function startFireworks(
+  onDisplayEnd?: () => void,
+  hooks: { onBurst?: () => void; onFinale?: () => void } = {},
+): () => void {
   const canvas = document.createElement('canvas')
   canvas.id = 'fireworks'
   Object.assign(canvas.style, {
@@ -246,6 +249,10 @@ export function startFireworks(onDisplayEnd?: () => void): () => void {
   }
 
   function burst(x: number, y: number, hue: number): void {
+    // One report per shell, so the sky and the sound stay together instead of
+    // four fixed stabs at the start and silence for the rest of the display.
+    hooks.onBurst?.()
+
     for (let i = 0; i < PART_COUNT; i++) {
       particles.push({
         x,
@@ -519,7 +526,20 @@ export function startFireworks(onDisplayEnd?: () => void): () => void {
             if (i % 5 === 0) launchOverCity()
 
             // Last one away: from here, an empty sky means the display is over.
-            if (i === 49) launchesScheduled = true
+            if (i === 49) {
+              launchesScheduled = true
+
+              /*
+               * The music comes in under the finale, not after it.
+               *
+               * onDisplayEnd fires when the last spark has faded and the trails
+               * have gone — several seconds later — which meant the sky went
+               * quiet and stayed quiet before anything replaced it. Cueing the
+               * track as the final shells are still climbing puts it underneath
+               * them, which is the effect the sequencing was always after.
+               */
+              hooks.onFinale?.()
+            }
           }, i * DISPLAY_INTERVAL_MS),
         )
       }
