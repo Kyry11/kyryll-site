@@ -36,17 +36,21 @@
 import { isNarrow } from './dom'
 
 /*
- * The bus every report is mixed through, well under the bed's 0.55. Sixty of
- * these go off across the display and several overlap at any moment, so each
- * has to sit low enough that a cluster is a rumble rather than a wall.
+ * The bus every report is mixed through.
  *
- * Measured against the single-burst version this replaced: the typical report
- * is about 5 dB quieter, the most distant 15 dB down, and the occasional close
- * one still lands where the old ones did. That last part is the point of
- * lowering the bus rather than simply turning everything down — the range has
- * to go somewhere, and quiet is where there was room.
+ * This is set from the whole display rather than from one shell, because the
+ * dense middle is what runs out of headroom first: fifty rockets 190 ms apart,
+ * each ringing for up to two seconds once its rumble is counted. Set it for a
+ * single satisfying bang and the middle clips; set it so the middle survives
+ * and a lone shell is inaudible. The compressor in makeBus() is what breaks
+ * that trade — it leaves single reports alone and only leans on the pile-ups —
+ * and it is the reason this number can be as high as it is.
+ *
+ * For scale: a typical report now peaks a little under the music bed's own
+ * RMS at 0.55, so a shell reads about as loud as the music it will eventually
+ * play under, and the full display peaks around 0.6 with no clipping.
  */
-const EXPLOSION_VOLUME = 0.115
+const EXPLOSION_VOLUME = 0.55
 
 export interface Audio {
   /** Fetch and decode during the cold open, so the track is ready on cue. */
@@ -274,11 +278,7 @@ export function createAudio(): Audio {
       if (!ctx || ctx.state !== 'running') return
 
       noise ??= makeNoise(ctx)
-      if (!bus) {
-        bus = ctx.createGain()
-        bus.gain.value = EXPLOSION_VOLUME
-        bus.connect(ctx.destination)
-      }
+      bus ??= makeBus(ctx)
 
       /*
        * How far off this shell is: 0 overhead, 1 across the water. Everything
@@ -316,7 +316,7 @@ export function createAudio(): Audio {
        * of the display at a rendered peak of 0.005 — not distant, just missing
        * on any laptop speaker.
        */
-      const level = 0.6 + near * 0.4
+      const level = 0.7 + near * 0.3
 
       // The report itself.
       noiseBurst(ctx, noise, dest, {
@@ -384,6 +384,36 @@ export function createAudio(): Audio {
       tryStart()
     },
   }
+}
+
+/**
+ * The bus every report is mixed through, and the compressor that keeps the
+ * dense part of the display from clipping.
+ *
+ * Fifty rockets go up 190 ms apart and each report rings for up to two seconds
+ * once its rumble is counted, so ten of them can be sounding at once. Summed
+ * flat, a level that suits one shell tears the middle of the display apart, and
+ * a level that survives the middle leaves a single shell inaudible — which is
+ * exactly the corner the first attempt at this painted itself into.
+ *
+ * The threshold sits above where any one report lands, so a lone shell passes
+ * through untouched and keeps every bit of its range. Only the pile-ups are
+ * pulled down, which is also what happens in the ear: a barrage does not sound
+ * ten times a single bang.
+ */
+function makeBus(ctx: AudioContext): GainNode {
+  const gain = ctx.createGain()
+  gain.gain.value = EXPLOSION_VOLUME
+
+  const comp = ctx.createDynamicsCompressor()
+  comp.threshold.value = -6
+  comp.knee.value = 4
+  comp.ratio.value = 10
+  comp.attack.value = 0.003
+  comp.release.value = 0.2
+
+  gain.connect(comp).connect(ctx.destination)
+  return gain
 }
 
 /**
