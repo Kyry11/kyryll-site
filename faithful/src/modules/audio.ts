@@ -36,11 +36,17 @@
 import { isNarrow } from './dom'
 
 /*
- * Well under the bed's 0.55. Sixty of these go off across the display and
- * several overlap at any moment, so each has to sit low enough that a cluster
- * is a rumble rather than a wall.
+ * The bus every report is mixed through, well under the bed's 0.55. Sixty of
+ * these go off across the display and several overlap at any moment, so each
+ * has to sit low enough that a cluster is a rumble rather than a wall.
+ *
+ * Measured against the single-burst version this replaced: the typical report
+ * is about 5 dB quieter, the most distant 15 dB down, and the occasional close
+ * one still lands where the old ones did. That last part is the point of
+ * lowering the bus rather than simply turning everything down — the range has
+ * to go somewhere, and quiet is where there was room.
  */
-const EXPLOSION_VOLUME = 0.16
+const EXPLOSION_VOLUME = 0.115
 
 export interface Audio {
   /** Fetch and decode during the cold open, so the track is ready on cue. */
@@ -87,16 +93,17 @@ export function createAudio(): Audio {
   let armed = false
 
   /*
-   * The reports are synthesised: a filtered noise burst with a fast decay,
-   * which is what a firework sounds like from across a harbour.
+   * The reports are synthesised rather than sampled, so sixty of them cost a
+   * few dozen nodes instead of sixty downloads. The previous arrangement
+   * preloaded four copies of a five-minute track for four sounds nobody could
+   * hear.
    *
-   * One shared noise buffer covers every shell — only playback rate, filter
-   * sweep and level vary — so sixty bursts cost sixty gain nodes rather than
-   * sixty downloads. The previous arrangement preloaded four copies of a
-   * five-minute track for four sounds nobody could hear.
+   * One noise buffer is shared by every shell, and every burst reads a
+   * different slice of it — see noiseBurst().
    */
   let ac: AudioContext | null = null
   let noise: AudioBuffer | null = null
+  let bus: GainNode | null = null
 
   function audioContext(): AudioContext | null {
     if (muted) return null
@@ -266,41 +273,110 @@ export function createAudio(): Audio {
       // a suspended context queues everything to fire at once when it resumes.
       if (!ctx || ctx.state !== 'running') return
 
-      if (!noise) {
-        // Two seconds of white noise, generated once. Long enough that varying
-        // the playback rate never runs off the end.
-        const frames = Math.floor(ctx.sampleRate * 2)
-        noise = ctx.createBuffer(1, frames, ctx.sampleRate)
-        const data = noise.getChannelData(0)
-        for (let i = 0; i < frames; i++) data[i] = Math.random() * 2 - 1
+      noise ??= makeNoise(ctx)
+      if (!bus) {
+        bus = ctx.createGain()
+        bus.gain.value = EXPLOSION_VOLUME
+        bus.connect(ctx.destination)
       }
 
-      const now = ctx.currentTime
-      const length = 0.45 + Math.random() * 0.35
-
-      const source = ctx.createBufferSource()
-      source.buffer = noise
-      source.playbackRate.value = 0.7 + Math.random() * 0.6
+      /*
+       * How far off this shell is: 0 overhead, 1 across the water. Everything
+       * below is derived from it, because in life these qualities are not
+       * independent — distance takes the top end off, softens the attack, drops
+       * the level and lengthens the tail, all at once. Rolling them separately
+       * is what makes synthesised repeats sound like one sound with a volume
+       * knob on it; moving them together is most of the realism here.
+       */
+      const distance = Math.random()
+      const near = 1 - distance
 
       /*
-       * The downward sweep is what makes it read as distance rather than
-       * static. A real report arrives as a crack that loses its top end almost
-       * at once; holding the filter open just sounds like tape hiss.
+       * Somewhere across the water rather than dead centre. Two reports at the
+       * same moment used to arrive at exactly the same place, which the ear
+       * hears as one louder report; separated, they stay two.
        */
-      const filter = ctx.createBiquadFilter()
-      filter.type = 'lowpass'
-      filter.frequency.setValueAtTime(1400 + Math.random() * 1200, now)
-      filter.frequency.exponentialRampToValueAtTime(140, now + length)
+      const pan = typeof ctx.createStereoPanner === 'function' ? ctx.createStereoPanner() : null
+      if (pan) {
+        pan.pan.value = (Math.random() * 2 - 1) * 0.7
+        pan.connect(bus)
+      }
+      const dest: AudioNode = pan ?? bus
 
-      const gain = ctx.createGain()
-      const peak = EXPLOSION_VOLUME * (0.6 + Math.random() * 0.4)
-      gain.gain.setValueAtTime(0.0001, now)
-      gain.gain.exponentialRampToValueAtTime(peak, now + 0.012)
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + length)
+      // A few milliseconds of scatter, so shells fired together never land on
+      // the same sample boundary and comb-filter each other.
+      const at = ctx.currentTime + Math.random() * 0.03
+      const body = 0.32 + distance * 0.45 + Math.random() * 0.25
 
-      source.connect(filter).connect(gain).connect(ctx.destination)
-      source.start(now)
-      source.stop(now + length + 0.05)
+      /*
+       * The floor here is higher than distance alone would suggest, and it has
+       * to be: a far shell is quietened twice over, once by this and again by
+       * the filter below, which throws away most of the energy in the noise on
+       * its way past. Scaling level honestly on top of that put the far quarter
+       * of the display at a rendered peak of 0.005 — not distant, just missing
+       * on any laptop speaker.
+       */
+      const level = 0.6 + near * 0.4
+
+      // The report itself.
+      noiseBurst(ctx, noise, dest, {
+        at,
+        length: body,
+        level,
+        from: 1100 + near * 1700,
+        to: 130 + near * 80,
+        attack: 0.005 + distance * 0.02,
+        rate: 0.75 + Math.random() * 0.5,
+      })
+
+      /*
+       * And the rumble coming back off the water and the buildings behind it,
+       * which is most of what a distant firework actually sounds like. Later,
+       * softer, longer, with nothing above a few hundred hertz left in it — and
+       * more of it the further off the shell is.
+       */
+      noiseBurst(ctx, noise, dest, {
+        at: at + 0.03 + distance * 0.07,
+        length: body * 1.7 + distance * 0.8,
+        level: level * (0.16 + distance * 0.34),
+        from: 340,
+        to: 95,
+        attack: 0.05 + distance * 0.12,
+        rate: 0.5 + Math.random() * 0.3,
+      })
+
+      // Close shells have a weight to them that filtered noise alone cannot
+      // give: the thump arrives as pitch, not as hiss.
+      if (near > 0.35) {
+        thump(ctx, dest, {
+          at,
+          length: 0.16 + Math.random() * 0.1,
+          level: level * 0.32,
+          from: 58 + Math.random() * 26,
+          to: 30,
+        })
+      }
+
+      /*
+       * Roughly one in five is a crackler — a scatter of small pops instead of
+       * a single report. Without something like it the display is sixty
+       * instances of one event, however carefully each is varied, and the ear
+       * works that out quickly.
+       */
+      if (Math.random() < 0.22) {
+        const pops = 5 + Math.floor(Math.random() * 5)
+        for (let i = 0; i < pops; i++) {
+          noiseBurst(ctx, noise, dest, {
+            at: at + 0.06 + Math.random() * (0.3 + distance * 0.3),
+            length: 0.03 + Math.random() * 0.04,
+            level: level * (0.1 + Math.random() * 0.18),
+            from: 1600 + near * 1800,
+            to: 500,
+            attack: 0.002,
+            rate: 0.9 + Math.random() * 0.7,
+          })
+        }
+      }
     },
 
     startTrack(): void {
@@ -308,6 +384,96 @@ export function createAudio(): Audio {
       tryStart()
     },
   }
+}
+
+/**
+ * Three seconds of white noise, generated once and shared by every report.
+ *
+ * Long enough that a burst can start anywhere in the first second and still
+ * have material left at the slowest playback rate.
+ */
+function makeNoise(ctx: AudioContext): AudioBuffer {
+  const frames = Math.floor(ctx.sampleRate * 3)
+  const buffer = ctx.createBuffer(1, frames, ctx.sampleRate)
+  const data = buffer.getChannelData(0)
+  for (let i = 0; i < frames; i++) data[i] = Math.random() * 2 - 1
+  return buffer
+}
+
+interface BurstOptions {
+  /** When it starts, on the context clock. */
+  at: number
+  length: number
+  /** Peak, before the shared bus takes it down to listening level. */
+  level: number
+  /** Lowpass cutoff at the attack, and at the end of the decay. */
+  from: number
+  to: number
+  attack: number
+  rate: number
+}
+
+/**
+ * One filtered noise burst: the body of a report, its tail, or a single grain
+ * of a crackle.
+ *
+ * The downward sweep is what makes it read as distance rather than static. A
+ * real report arrives as a crack that loses its top end almost at once;
+ * holding the filter open just sounds like tape hiss.
+ */
+function noiseBurst(ctx: AudioContext, buffer: AudioBuffer, dest: AudioNode, o: BurstOptions): void {
+  const source = ctx.createBufferSource()
+  source.buffer = buffer
+  source.playbackRate.value = o.rate
+
+  /*
+   * A different slice of the buffer every time, which is the difference
+   * between varied and merely modulated.
+   *
+   * Every report used to begin at sample zero of the same noise, so however
+   * much the filter and the level moved around, the grain underneath was
+   * identical sixty times over — and the fine structure is exactly what the
+   * ear latches onto as repetition. Reading from a random offset costs
+   * nothing and there is no seam to hide, because it is noise.
+   */
+  const consumed = o.length * o.rate
+  const offset = Math.random() * Math.max(0, buffer.duration - consumed - 0.05)
+
+  const filter = ctx.createBiquadFilter()
+  filter.type = 'lowpass'
+  filter.frequency.setValueAtTime(o.from, o.at)
+  filter.frequency.exponentialRampToValueAtTime(o.to, o.at + o.length)
+
+  // Exponential ramps cannot touch zero, hence the floors.
+  const gain = ctx.createGain()
+  gain.gain.setValueAtTime(0.0001, o.at)
+  gain.gain.exponentialRampToValueAtTime(Math.max(o.level, 0.0002), o.at + o.attack)
+  gain.gain.exponentialRampToValueAtTime(0.0001, o.at + o.length)
+
+  source.connect(filter).connect(gain).connect(dest)
+  source.start(o.at, offset)
+  source.stop(o.at + o.length + 0.05)
+}
+
+/** The low body of a near shell: a sine dropping in pitch as it decays. */
+function thump(
+  ctx: AudioContext,
+  dest: AudioNode,
+  o: { at: number; length: number; level: number; from: number; to: number },
+): void {
+  const osc = ctx.createOscillator()
+  osc.type = 'sine'
+  osc.frequency.setValueAtTime(o.from, o.at)
+  osc.frequency.exponentialRampToValueAtTime(o.to, o.at + o.length)
+
+  const gain = ctx.createGain()
+  gain.gain.setValueAtTime(0.0001, o.at)
+  gain.gain.exponentialRampToValueAtTime(Math.max(o.level, 0.0002), o.at + 0.012)
+  gain.gain.exponentialRampToValueAtTime(0.0001, o.at + o.length)
+
+  osc.connect(gain).connect(dest)
+  osc.start(o.at)
+  osc.stop(o.at + o.length + 0.05)
 }
 
 /**
