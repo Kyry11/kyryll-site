@@ -182,10 +182,10 @@
  *
  * Taken out of the layout entirely rather than hidden with `opacity: 0`, which
  * is what this had before and which lost: `#sound:hover` and
- * `#sound[aria-pressed='true']` are both (1,1,0) selectors and outrank a bare
- * `#sound` at (1,0,0) whatever the media query, so the icon faded straight back
- * in the moment the track started playing. Specificity does not care which rule
- * you wrote last.
+ * `#sound[aria-pressed]` are both (1,1,0) selectors and outrank a bare `#sound`
+ * at (1,0,0) whatever the media query, so the icon faded straight back in the
+ * moment the track started playing. Specificity does not care which rule you
+ * wrote last.
  *
  * Not `display: none`, though. Audio starts by itself here, and WCAG 1.4.2
  * wants a way to stop it that does not depend on knowing a secret key — the
@@ -193,35 +193,31 @@
  * is clipped out of the picture while remaining in the tab order, and it comes
  * back the moment it takes focus. Visually the scene is exactly as the original
  * had it; a keyboard user is one Tab away from a real, labelled control.
- *
- * Hidden only while the sound is ON, though — see below.
  */
 @media (min-width: 1001px) {
   /*
-   * `[aria-pressed='true']`, not the bare `[aria-pressed]` this had before.
+   * Both states, which is the original's behaviour and was briefly unsafe.
    *
-   * Hiding it in both states made the desktop silently unrecoverable. The mute
-   * preference persists in localStorage, so one stray space bar — the only
-   * desktop control there was — silenced every future visit, with the icon that
-   * would undo it clipped to a pixel. The site simply had no sound any more and
-   * nothing on screen said why or offered a way back.
+   * This narrowed to `[aria-pressed='true']` for a while — visible whenever the
+   * sound was off — because hiding it in both states had made the desktop
+   * silently unrecoverable: mute was written to localStorage, so one stray
+   * space bar outlived the visit and every future arrival was mute, with the
+   * icon that would undo it clipped to a pixel.
    *
-   * The reason for hiding it never applied to that state anyway: the argument
-   * is that the track starts by itself so the icon is just something in the way.
-   * When the track is off, the icon is not in the way — it is the only way back.
-   * So it is present exactly when it is useful and gone the rest of the time,
-   * which is also what makes the space bar safe to press.
+   * That was a fix for the persistence, not for the hiding. The persistence is
+   * gone now, and the track stops by itself after one pass, so a mistaken mute
+   * costs the rest of one visit and a reload clears it. With the trap removed
+   * the original's own answer is the right one again: the desktop scene is
+   * never interrupted by a 100px speaker, in either state.
    *
-   * On specificity, since these rules have now been rewritten twice for losing
-   * it: `#sound:hover` and `#sound[aria-pressed='true']` are both (1,1,0), so a
+   * On specificity, since these rules have now been rewritten three times for
+   * losing it: `#sound:hover` and `#sound[aria-pressed]` are both (1,1,0), so a
    * bare `#sound` at (1,0,0) never beat them, media query or not. Matching the
    * attribute ties at (1,1,0) and wins on order; :hover and :focus-visible take
-   * it to (1,2,0), above both. Narrowing to ='true' changes nothing about the
-   * weight — it is still one attribute selector — so the ordering that was
-   * verified here still holds.
+   * it to (1,2,0), above both.
    */
-  #sound[aria-pressed='true'],
-  #sound[aria-pressed='true']:hover {
+  #sound[aria-pressed],
+  #sound[aria-pressed]:hover {
     width: 1px;
     height: 1px;
     margin: 0;

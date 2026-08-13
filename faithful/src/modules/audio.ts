@@ -20,6 +20,7 @@
  *   fireworks      one report per burst, for as long as the display runs
  *   the finale     the track proper begins, a few seconds before the last
  *                  shells burn out, so the music arrives under them
+ *   five minutes   it ends, and stays ended
  *
  * The original called .play() during load and expected it to work. Every
  * browser has blocked unprompted playback since 2017, so it has silently not
@@ -41,14 +42,6 @@ import { isNarrow } from './dom'
  */
 const EXPLOSION_VOLUME = 0.16
 
-/*
- * Deliberately not the key the earlier build used ('kyryll:sound'). That one
- * recorded on/off with sound defaulting to *off*, so a stored 'off' says
- * nothing about whether the visitor ever chose silence — reading it here would
- * mute people permanently for a preference they never expressed.
- */
-const PREF_KEY = 'kyryll:muted'
-
 export interface Audio {
   /** Fetch and decode during the cold open, so the track is ready on cue. */
   prime(): void
@@ -62,17 +55,32 @@ export function createAudio(): Audio {
   const button = document.getElementById('sound')
   const bed = new window.Audio()
 
-  bed.loop = true
+  /*
+   * Once through, where the original looped forever.
+   *
+   * Five minutes of music is a long visit already, and a second lap says
+   * nothing the first did not. When it ends the harbour is simply quiet, which
+   * is the right ending for a scene that opens with fireworks.
+   */
+  bed.loop = false
   bed.volume = 0.55
   bed.preload = 'auto'
   bed.src = pickSource()
 
+  /*
+   * Nothing is remembered between visits, deliberately.
+   *
+   * Persisting this was what made silence permanent: the preference outlived
+   * the visit that set it, so one stray space bar meant every future arrival
+   * was mute, and on the desktop the icon that would undo it is not on screen
+   * to be found. Both halves of that are now gone — the choice lasts as long
+   * as the page does, and a reload always brings the sound back.
+   *
+   * It costs a returning visitor who genuinely wants silence one keypress.
+   * That is the cheaper mistake by a long way: the other one is unrecoverable
+   * without opening devtools, which is not a thing to ask of anybody.
+   */
   let muted = false
-  try {
-    muted = window.localStorage.getItem(PREF_KEY) === '1'
-  } catch {
-    // Private mode; default to sound on, as the original did.
-  }
 
   let playing = false
   let wantsTrack = false
@@ -188,24 +196,21 @@ export function createAudio(): Audio {
     }
 
     reflect()
-
-    try {
-      window.localStorage.setItem(PREF_KEY, muted ? '1' : '0')
-    } catch {
-      // ignore
-    }
   }
 
   button?.addEventListener('click', toggle)
 
   /*
-   * On the desktop the speaker is hidden while the sound is playing — the
-   * original showed it on touch devices only, and this reproduces that. Space
-   * mutes, which is undiscoverable and was for a while the *only* desktop
-   * control: because the choice below is persisted, one stray press silenced
-   * every future visit with nothing on screen to undo it. The icon now comes
-   * back whenever the sound is off (see layout.css), so the scene stays clear
-   * while the music plays and the way back is always visible when it is not.
+   * On the desktop the speaker is not on screen at all — the original showed
+   * it on touch devices only, and this reproduces that. Space is the control
+   * there, along with Tab, which brings the real button into view (see the
+   * :focus-visible rule in layout.css).
+   *
+   * Space being undiscoverable used to matter a great deal, because the choice
+   * it made was written to localStorage: one stray press silenced every future
+   * visit, with nothing on screen to undo it. Nothing is stored now and the
+   * track stops on its own after one pass, so the worst a stray press can do
+   * is mute the rest of this visit, and a reload undoes it.
    *
    * Space is a busy key, so this yields in every case where it already means
    * something: it is the activation key for whatever control has focus, the
