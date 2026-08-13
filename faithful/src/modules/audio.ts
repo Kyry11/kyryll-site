@@ -96,6 +96,14 @@ export function createAudio(): Audio {
   let wantsTrack = false
   let armed = false
 
+  // Keep the bookkeeping aligned with the media element when it reaches the
+  // natural end. In particular, a later mute/unmute must not call play() again:
+  // browsers restart ended media from the beginning, but this track is meant
+  // to play once and stay ended.
+  bed.addEventListener('ended', () => {
+    playing = false
+  })
+
   /*
    * The reports are synthesised rather than sampled, so sixty of them cost a
    * few dozen nodes instead of sixty downloads. The previous arrangement
@@ -143,16 +151,19 @@ export function createAudio(): Audio {
 
   /** Plays if the track is due, not muted, and the browser will allow it. */
   function tryStart(): void {
-    if (muted || !wantsTrack || playing) return
+    if (muted || !wantsTrack || playing || bed.ended) return
 
     void bed.play().then(
       () => {
-        playing = true
+        // A mute can pause the element while play() is still pending. Read the
+        // element's settled state rather than letting that stale promise mark a
+        // paused (or already ended) track as playing.
+        playing = !muted && !bed.paused && !bed.ended
         reflect()
       },
       () => {
         // Refused by the autoplay policy. Wait for a gesture and try again.
-        armFirstGesture()
+        if (!muted && !bed.ended) armFirstGesture()
       },
     )
   }
