@@ -65,6 +65,7 @@ const NO_FALLBACK = ['/img/', '/fonts/', '/sound/', '/assets/', '/api/']
  * this.
  */
 const MIME_FIXES = {
+  '.mobileconfig': 'application/x-apple-aspen-config',
   '.m4a': 'audio/mp4',
   '.woff': 'font/woff',
   '.mp3': 'audio/mpeg',

@@ -356,6 +356,7 @@ jobs:
           fix_type '*.mp3' 'audio/mpeg'
           fix_type '*.ogg' 'audio/ogg'
           fix_type '*.woff' 'font/woff'
+          fix_type '*.mobileconfig' 'application/x-apple-aspen-config'
 
           az storage blob upload \
             --container-name '$web' \

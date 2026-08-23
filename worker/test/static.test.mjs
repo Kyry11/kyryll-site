@@ -81,6 +81,7 @@ test.beforeEach(() => {
     // The build drops these at the root, outside every prefix rule.
     '/favicon.ico': { type: 'image/x-icon' },
     '/apple-touch-icon.png': { type: 'image/png' },
+    '/gooch.mobileconfig': { type: 'application/octet-stream' },
   }
 })
 
@@ -164,6 +165,10 @@ test('content types storage gets wrong are corrected', async () => {
   // exactly like the audio bug this repo already spent a session on.
   assert.equal((await get('/sound/odessa.m4a')).headers.get('content-type'), 'audio/mp4')
   assert.equal((await get('/fonts/chennai-bold.woff')).headers.get('content-type'), 'font/woff')
+  assert.equal(
+    (await get('/gooch.mobileconfig')).headers.get('content-type'),
+    'application/x-apple-aspen-config',
+  )
   // Types storage gets right are left alone.
   assert.equal((await get('/img/bg1.jpg')).headers.get('content-type'), 'image/jpeg')
 })
